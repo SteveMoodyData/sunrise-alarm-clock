@@ -93,7 +93,7 @@ A gradual, natural sunrise simulation using WS2812B LED strips and ESP32. Wake u
    - FastLED library
 
 3. **Upload the sketch:**
-   - Open `SRM_Sunrise_NonBlocking.ino`
+   - Open `SRM_Sunrise_Smooth.ino`
    - Select your ESP32 board
    - Upload
 
