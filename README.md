@@ -1,6 +1,6 @@
 # 🌅 Smart Sunrise Alarm Clock
 
-A gradual, natural sunrise simulation using WS2812B LED strips and ESP32. Wake up gently to 30 minutes of smooth color transitions from deep red through orange to warm golden yellow.
+A gradual, natural sunrise simulation using WS2812B LED strips or ring and Arduino Nano or ESP32 board. Wake up gently to 30 minutes of smooth color transitions from deep red through orange to warm golden yellow.
 
 ![Sunrise Demo](docs/images/sunrise-demo.gif)
 *30-minute color progression from dark red to golden yellow*
