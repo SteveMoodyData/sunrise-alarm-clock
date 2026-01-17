@@ -304,15 +304,48 @@ void loop() {
 
 ## 🎨 Enclosure Ideas
 
+### Steve's Recommended Setup (Proven Build)
+
+**Arduino Nano Enclosure:**
+- **3D Printable Case:** [Arduino Nano Case on Thingiverse](https://www.thingiverse.com/thing:608121)
+- Simple snap-fit design
+- Protects board and provides mounting points
+- Access holes for USB and pins
+
+**LED Ring Diffuser:**
+- **3D Printable Ring Diffuser:** [LED Ring Diffuser on Thingiverse](https://www.thingiverse.com/thing:3286646)
+- Designed specifically for WS2812B rings
+- Creates smooth, even light distribution
+- Professional-looking finish
+
+**Ready-Made Option (No 3D Printer Required):**
+- **IKEA FADO Table Lamp:** [$29.99 - Buy here](https://www.ikea.com/us/en/p/fado-table-lamp-white-10096386/)
+- Perfect fit for 24-pixel LED ring
+- Frosted white globe provides beautiful diffusion
+- Just remove the IKEA electronics and mount your LED ring inside
+- Result: Professional-looking bedside sunrise alarm
+
+**Complete Build Setup:**
+1. Print Nano case and LED ring diffuser (or use IKEA Fado)
+2. Mount Nano case near outlet (double-sided tape or screws)
+3. Route wires cleanly to LED ring
+4. Place LED ring with diffuser on nightstand
+5. Plug USB cable into smart outlet
+
+---
+
+### Other Enclosure Options
+
 ### Simple Options
 - **Lamp shade:** Place LED ring behind frosted glass lamp shade
-- **Globe light:** Use IKEA-style paper globe lantern
+- **Globe light:** Use IKEA-style paper globe lantern (Fado recommended)
 - **Picture frame:** Mount behind frosted acrylic in deep frame
 
 ### 3D Printable Designs
 - Cylindrical diffuser with top opening
 - Dome with mounting clips for LED ring
 - Adjustable angle bracket for bedside mounting
+- **Steve's tested picks above** ⬆️
 
 ### DIY Frosted Diffuser
 - White acrylic sheet (1/8" thick)
