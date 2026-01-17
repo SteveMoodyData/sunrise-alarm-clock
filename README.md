@@ -75,7 +75,7 @@ A gradual, natural sunrise simulation using WS2812B LED strips or ring and Ardui
 
 **Total Cost:** $15-50 depending on components and smart outlet
 
-📋 [Full parts list with links](docs/hardware.md)
+📋 [Full parts list with links](docs/Arduino_Hardware.md)
 
 ## ⚡ Quick Start
 
