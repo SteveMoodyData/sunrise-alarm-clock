@@ -1,54 +1,35 @@
 # Spec: WiFi-Scheduled Sunrise (`SRM_Sunrise_Scheduled.ino`)
 
-Describes the behavior of `arduino/standalone/SRM_Sunrise_Scheduled.ino`. Everything below "Purpose" through "Verification checklist" describes what's **currently implemented and working on real hardware** (v1). The "Proposed changes (v2)" section immediately after "Purpose" describes four new features requested but **not yet implemented** — pending review before any code changes are made. For the design rationale behind the v1 shape, see `_plans/wifi-scheduled-sunrise.md`.
+Describes the behavior of `arduino/standalone/SRM_Sunrise_Scheduled.ino`. Everything from "Purpose" through "Verification checklist" describes what's **currently implemented and working on real hardware**. The "Proposed changes (v3)" section right after "Purpose" describes a feature that's been reviewed but **not yet implemented**. For the design rationale behind these decisions, see `_plans/wifi-scheduled-sunrise.md`.
 
 ## Purpose
 
-Runs the same 512-step sunrise color progression as the other sketches in this repo, but triggers it from an onboard weekly alarm schedule (set via a web page) instead of an external smart outlet cutting power.
+Runs the same 512-step sunrise color progression as the other sketches in this repo, but triggers it from an onboard per-day alarm schedule (set via a web page) instead of an external smart outlet cutting power, with an editable sunrise duration, an editable post-sunrise hold time, and a manual "Start Now" trigger.
 
-## Proposed changes (v2 — pending review, not yet implemented)
+## Proposed changes (v3 — pending review, not yet implemented)
 
-Four features requested after v1 was confirmed working on real hardware. No code has been touched for these yet. Each includes an implementation note where the change isn't a simple additive tweak, and open questions are called out explicitly rather than decided here.
+### WiFi setup without source-code access (captive portal provisioning)
 
-### 1. mDNS hostname (`sunrise-light`)
+**Driver:** today, WiFi credentials live in `wifi_secrets.h`, a file the end user must hand-edit and reflash via Arduino IDE. That's fine for the person building the device, but not viable if it's gifted to someone with no access to the source code or dev tools — they need to be able to join their own network without any of that.
 
-Replace/augment IP-address access with a friendly hostname.
+- New external dependency: **`WiFiManager`** (tzapu/WiFiManager). This is the first dependency beyond FastLED — a deliberate, explicit departure from this repo's zero-extra-deps convention, justified because there's no reasonable way to build out-of-box WiFi setup on top of the ESP32 Arduino core alone.
+- `connectWiFi()` is replaced entirely. Instead of `WiFi.begin(WIFI_SSID, WIFI_PASSWORD)` against a fixed hardcoded network, it becomes `WiFiManager wm; wm.autoConnect(SETUP_AP_NAME)`. `autoConnect()` already implements the whole flow needed, with no custom logic required:
+  1. Tries previously-saved credentials (stored by WiFiManager in its own flash storage, separate from this sketch's `"sunrise"` Preferences namespace).
+  2. If that fails within its connect timeout, it automatically starts an AP + captive portal **on that same boot** — no separate fallback logic to write, this is the library's default behavior.
+  3. The recipient connects their phone to the broadcast network (default name via new constant `SETUP_AP_NAME`, e.g. `"sunrise-light-setup"`) using their phone's normal WiFi settings — no app required. A setup page (auto-popup or `192.168.4.1`) lists nearby networks; they pick theirs and enter the password.
+  4. Device reboots and joins that network; normal operation (web UI, mDNS, scheduler) proceeds as before.
+- `wifi_secrets.h` / `wifi_secrets.h.example` become **obsolete and are removed** for this sketch — WiFiManager owns credential storage now, so the `#include "wifi_secrets.h"` line and the `WIFI_SSID`/`WIFI_PASSWORD` `#define`s go away entirely. This is a real behavior change from the current setup, not just an addition on top of it.
+- `scanAndPrintNetworks()` (the temporary diagnostic added earlier to debug an SSID typo) becomes redundant, since WiFiManager's captive portal already scans and lists nearby networks itself. Candidate for removal.
 
-- Add `#include <ESPmDNS.h>` (ships with ESP32 Arduino core, no new dependency).
-- New config constant `#define MDNS_HOSTNAME "sunrise-light"`. **This constant holds the bare name only — do not include `.local` in it.** `MDNS.begin()` takes the bare hostname; the `.local` suffix is appended automatically by the resolver, not stored by the device. Passing `"sunrise-light.local"` here would make the device advertise itself as `sunrise-light.local.local`, which is wrong.
-- After a successful WiFi connect: `MDNS.begin(MDNS_HOSTNAME)` then `MDNS.addService("http", "tcp", WEB_SERVER_PORT)`.
-- Device becomes reachable at `http://sunrise-light.local/` in addition to its IP (the `.local` suffix only ever appears in the URL you type/resolve, never in the sketch's config).
+**Re-provisioning — resolved with the user, no new hardware required:**
+- **Auto-fallback**: free, via `autoConnect()`'s default behavior above. If the saved network becomes unreachable (moved house, changed router), the very next boot drops into the setup hotspot automatically — no custom retry-counter logic needed.
+- **Manual reset while still connected**: new `POST /reset-wifi` route (`handleResetWifi()`) that calls `wm.resetSettings()` then `ESP.restart()`. A new "Reset WiFi" button on the status page, next to the existing "Start Now" button, so someone can deliberately switch networks without first having to fail a connection.
 
-**Caveat to flag, not a blocker:** `.local` (mDNS/Bonjour) resolution is native on macOS, iOS, Android, and Linux, but **Windows does not resolve `.local` names out of the box** — it needs Bonjour installed (comes bundled with iTunes, or standalone "Bonjour Print Services") or Windows' own mDNS support (present on recent Windows 10/11, not guaranteed on older versions). Worth confirming this works from whatever device you'll actually use day-to-day before relying on it instead of the IP.
-
-### 2. Runtime-configurable sunrise duration
-
-Today `SUNRISE_MINUTES` is a compile-time `#define` — changing it requires re-flashing. Make it a web-editable, NVS-persisted setting.
-
-- New NVS key `sunriseMinutes` (uint16, minutes), replacing the compile-time-only value as the source of truth at runtime. Keep a `#define DEFAULT_SUNRISE_MINUTES` for first-boot-before-any-save fallback.
-- Add a number input to the web form; `handleSet()` validates and saves it.
-
-**Implementation note (not a design question, just a real constraint):** `sunrise()`'s step interval is currently computed once via `static const uint16_t interval = (SUNRISE_MINUTES * 60000UL) / totalSteps;` and handed to FastLED's `EVERY_N_MILLISECONDS_I(sunriseTimer, interval)` macro. Because `interval` is `static`, it's only evaluated the *first* time `sunrise()` runs — changing the underlying variable afterward won't retroactively change an already-running timer's period. Making duration runtime-editable means explicitly recomputing `interval` and calling `sunriseTimer.setPeriod(interval)` (the `_I` "instance" variant of the macro exists specifically to allow this) at the point `RUNNING` is entered, not just relying on the macro's implicit static init.
-
-### 3. Hold-time variable (auto-off after sunrise)
-
-Today, `HOLD` holds the final color indefinitely and only turns off at local midnight (day-rollover triggers the transition back to `WAITING`). Replace this with an explicit, configurable duration.
-
-- New NVS key `holdMinutes` (uint8 is sufficient — range below fits in 0–120 — minutes to hold the final color after the sunrise ramp finishes, before turning LEDs off). `#define DEFAULT_HOLD_MINUTES 60`.
-- **Valid range: 0–120 (2 hours), default 60.** `0` is explicitly valid — LEDs go straight to black the instant the ramp completes. `handleSet()` clamps any submitted value to this range the same way `hour`/`minute` are already clamped today.
-- On entering `HOLD`, record `holdStartMillis = millis()`.
-- `HOLD` exits to `WAITING` (LEDs set to black) once `millis() - holdStartMillis >= holdMinutes * 60000UL`, **replacing** the current midnight-rollover exit condition entirely.
-- The existing `lastFiredYday` guard is untouched and still independently prevents re-firing later the same day, even though the state machine now leaves `HOLD` well before midnight in the typical case.
-
-### 4. Independent per-day schedule
-
-Resolved: **not** a fixed weekday/weekend split — each of the 7 days gets its own independently configurable alarm time and enabled toggle, so e.g. Mon/Wed/Fri can be set to 6:30, Sat/Sun to 7:30, and Tue/Thu left disabled entirely, all as individual per-day settings (a weekday/weekend split couldn't express "M/W/F but not Tu/Th" without still being per-day underneath, so this replaces that idea rather than sitting alongside it).
-
-- Replaces the v1 `alarmHour`/`alarmMinute`/`alarmDaysMask`/`alarmEnabled` single-alarm-plus-mask model entirely.
-- In-RAM state becomes arrays indexed by `tm_wday` (0=Sunday…6=Saturday): `uint8_t dayHour[7]`, `uint8_t dayMinute[7]`, `bool dayEnabled[7]`.
-- NVS keys built programmatically per index in a loop (e.g. `"d0h"/"d0m"/"d0e"` … `"d6h"/"d6m"/"d6e"`) rather than 21 hand-written named constants — `loadAlarmSettings()`/`saveAlarmSettings()` iterate `for (int i = 0; i < 7; i++)` instead of reading/writing fixed keys.
-- `updateScheduler()`'s `WAITING` check becomes: `dayEnabled[now.tm_wday] && now.tm_hour == dayHour[now.tm_wday] && now.tm_min == dayMinute[now.tm_wday] && lastFiredYday != now.tm_yday`.
-- Web form becomes 7 rows (Sun…Sat), each with its own enabled checkbox, hour input, and minute input, pre-filled from the current per-day arrays. `handleSet()` reads and validates all 7 rows in a loop, same clamping rules as today (hour ≤23, minute ≤59) applied per day.
+**Caveats:**
+1. While the captive portal is active (first boot with no saved creds, or right after a "Reset WiFi"), `setup()` blocks inside `wm.autoConnect()` until the user finishes setup or the config portal timeout elapses — LEDs, NTP sync, and the normal web server are all on hold during that window. This is a deliberate, bounded exception to the sketch's otherwise non-blocking philosophy, scoped only to rare setup events, never normal runtime.
+2. A config portal timeout should be set (proposed: a few minutes) so the device doesn't block forever if nobody finishes setup — consistent with the existing fails-safe philosophy of continuing to boot rather than hanging. If it times out unconfigured, the board proceeds with no WiFi, same as today's behavior when WiFi never connects; the recipient would need to power-cycle to get the portal to try again. **Open question:** is a bounded timeout-then-continue the right call here, or should the portal stay open indefinitely until configured, given there's no physical button to reopen it later? Leaning toward a timeout (so a stray "Reset WiFi" tap doesn't strand the device with literally no way back if someone walks away), but flagging since it trades against "the portal is the only path back to a working device."
+3. During the portal, the device isn't reachable at `sunrise-light.local` or its normal IP — only at the setup AP's own address (typically `192.168.4.1`).
+4. Credentials live in WiFiManager's own storage now rather than anywhere visible in this sketch's own NVS namespace or web UI. There's no new "show current SSID" affordance needed though — the status page's existing `WiFi.SSID()`/`WiFi.localIP()` display keeps working regardless of how the connection was configured.
 
 ## Requirements
 
@@ -56,35 +37,41 @@ Resolved: **not** a fixed weekday/weekend split — each of the 7 days gets its 
 - **Continuous power** (wall adapter / always-on USB). This sketch does not work with the smart-outlet-cuts-power model used by the other sketches — see `docs/Arduino_Hardware.md`.
 - WiFi network with internet access (for NTP). 2.4GHz only, per ESP32 hardware.
 - FastLED library (matches the rest of the repo; tested against 3.9.20 — avoid 3.10.3, see `CLAUDE.md`).
-- `WiFi.h`, `WebServer.h`, `Preferences.h`, `time.h` — all ship with the ESP32 Arduino core, no extra libraries to install.
+- `WiFi.h`, `WebServer.h`, `Preferences.h`, `ESPmDNS.h`, `time.h` — all ship with the ESP32 Arduino core, no extra libraries to install.
+- A `wifi_secrets.h` file in the sketch folder (gitignored, not committed) with real `WIFI_SSID`/`WIFI_PASSWORD` values — copy `wifi_secrets.h.example` and fill it in before flashing. (The v3 proposal above would remove this requirement entirely.)
 
 ## Configuration (`#define` block, top of file)
 
 | Constant | Default | Meaning |
 |---|---|---|
 | `NUM_LEDS` | 24 | LED count |
-| `SUNRISE_MINUTES` | 30 | Sunrise duration |
+| `DEFAULT_SUNRISE_MINUTES` | 30 | First-boot fallback only — the runtime value (`sunriseMinutes`, web-editable) comes from NVS once set |
+| `DEFAULT_HOLD_MINUTES` | 60 | First-boot fallback only — the runtime value (`holdMinutes`, web-editable, range 0–120) comes from NVS once set |
 | `DATA_PIN` | 18 | LED data GPIO |
-| `WIFI_SSID` / `WIFI_PASSWORD` | placeholder strings | Must be edited before flashing |
+| `WIFI_SSID` / `WIFI_PASSWORD` | — | Not defined in this file — come from `wifi_secrets.h` (gitignored), included near the top |
 | `WIFI_CONNECT_TIMEOUT_MS` | 15000 | Max time `setup()` waits for WiFi before giving up and continuing offline |
-| `TZ_STRING` | `"EST5EDT,M3.2.0,M11.1.0"` | POSIX TZ string; must be edited for your timezone |
+| `MDNS_HOSTNAME` | `"sunrise-light"` | Bare hostname only, no `.local` suffix — see in-code comment for why |
+| `TZ_STRING` | `"PST8PDT,M3.2.0,M11.1.0"` | POSIX TZ string; must be edited for your timezone |
 | `NTP_SERVER` | `"pool.ntp.org"` | NTP source |
 | `NTP_SYNC_TIMEOUT_MS` | 15000 | Max time `setup()` waits for the first time sync |
 | `WEB_SERVER_PORT` | 80 | HTTP port |
 
-Compile-time defaults for the alarm itself (used only until the web form is submitted once, since NVS has no value yet): hour `6`, minute `30`, days `Mon–Fri` (`0b0111110`), enabled `false`.
+Compile-time defaults for the per-day schedule itself (used only until the web form is submitted once, since NVS has no value yet): every day defaults to 6:30, all **disabled**.
 
 ## Behavior
 
 ### Boot sequence (`setup()`)
 
 1. LEDs initialized and set to black.
-2. `connectWiFi()` — connects to `WIFI_SSID`; blocks up to `WIFI_CONNECT_TIMEOUT_MS`, then proceeds regardless of outcome (does not halt on failure).
-3. `syncTime()` — no-ops if WiFi didn't connect; otherwise calls `configTzTime()` and polls `getLocalTime()` up to `NTP_SYNC_TIMEOUT_MS`.
-4. `loadAlarmSettings()` — reads alarm hour/minute/days/enabled from NVS namespace `"sunrise"`, falling back to the compile-time defaults above if unset.
-5. Web routes registered, server started.
+2. `connectWiFi()` — prints a scan of every visible network (temporary diagnostic, see below), then connects to `WIFI_SSID`/`WIFI_PASSWORD` from `wifi_secrets.h`; blocks up to `WIFI_CONNECT_TIMEOUT_MS`, then proceeds regardless of outcome (does not halt on failure).
+3. `startMDNS()` — no-ops if WiFi didn't connect; otherwise starts the mDNS responder so the device is reachable at `http://sunrise-light.local/`.
+4. `syncTime()` — no-ops if WiFi didn't connect; otherwise calls `configTzTime()` and polls `getLocalTime()` up to `NTP_SYNC_TIMEOUT_MS`.
+5. `loadAlarmSettings()` — reads the per-day schedule plus `sunriseMinutes`/`holdMinutes` from NVS namespace `"sunrise"`, falling back to the compile-time defaults above if unset.
+6. Web routes registered, server started.
 
 If WiFi or NTP fail, boot still completes — see "Fails-safe behavior" below.
+
+**Temporary diagnostic:** `scanAndPrintNetworks()`, called at the start of `connectWiFi()`, prints every WiFi network the board can see (SSID, signal strength, open/secured) to Serial before attempting to connect. Left in from debugging an earlier SSID typo; marked in-code as removable once no longer needed.
 
 ### Main loop
 
@@ -97,40 +84,48 @@ Every `loop()` iteration, unconditionally and non-blockingly:
 
 Three states: `WAITING`, `RUNNING`, `HOLD`.
 
-**WAITING** (LEDs off). On every tick, if all of the following hold:
-- `alarmEnabled` is true
-- today's `tm_wday` bit is set in `alarmDaysMask`
-- current `tm_hour`/`tm_min` exactly equal `alarmHour`/`alarmMinute`
+**WAITING** (LEDs off). Requires wall-clock time to evaluate — if `getLocalTime()` fails (no NTP sync yet), this case does nothing that tick. When time is available, if all of the following hold for *today's* day-of-week (`tm_wday`, 0=Sunday…6=Saturday):
+- `dayEnabled[tm_wday]` is true
+- current `tm_hour`/`tm_min` exactly equal `dayHour[tm_wday]`/`dayMinute[tm_wday]`
 - the alarm hasn't already fired today (`lastFiredYday != tm_yday`)
 
-...then `currentStep` resets to 0, `lastFiredYday` is set to today, and state moves to `RUNNING`.
+...then `beginSunrise()` runs: `currentStep` resets to 0, `lastFiredYday` is set to today, the sunrise timer's period is recomputed from the current `sunriseMinutes` and applied via `sunriseTimer.setPeriod()`/`reset()`, and state moves to `RUNNING`.
 
-Because the match is on exact hour/minute equality (checked once per `loop()` iteration, effectively many times per second), a missed minute — e.g. the board reboots or is busy exactly during that minute — means the alarm will **not** fire until its next scheduled day. There is no "catch-up" logic.
+Because the match is on exact hour/minute equality (checked many times per second), a missed minute — e.g. the board reboots or is busy exactly during that minute — means the alarm will **not** fire until its next scheduled day. There is no "catch-up" logic.
 
-**RUNNING**: calls `sunrise()` every tick (see below). Once `currentStep` reaches 511, moves to `HOLD`.
+**RUNNING**: calls `sunrise()` every tick (see below). Once `currentStep` reaches 511, records `holdStartMillis = millis()` and moves to `HOLD`.
 
-**HOLD**: LEDs hold at the final sunrise color (no changes made; `leds[]` already has the value from the last `sunrise()` call). When local calendar day changes (`tm_yday != lastFiredYday`), LEDs are set to black and state returns to `WAITING`.
+**HOLD**: LEDs hold at the final sunrise color (no changes made; `leds[]` already has the value from the last `sunrise()` call). Once `millis() - holdStartMillis >= holdMinutes * 60000`, LEDs are set to black and state returns to `WAITING`.
+
+**Only `WAITING` needs wall-clock time** — `RUNNING` and `HOLD` are driven entirely by `millis()`, so a sunrise already in progress (or a manually-triggered one, see `beginSunrise()` below) keeps running/holding correctly even if NTP has never synced or WiFi drops mid-sunrise.
+
+### `beginSunrise()` — manual and scheduled trigger, shared
+
+The "enter `RUNNING`" logic is factored into a single `beginSunrise()` function, called from two places: `updateScheduler()`'s `WAITING` case (above) when the schedule matches, and `handleStartNow()` (below) when the web UI's **Start Now** button is pressed. Both paths reset `currentStep`, retune the sunrise timer, and mark today as fired (suppressing the schedule from also firing later that same day) — except that if wall-clock time isn't available, marking "today as fired" is silently skipped (there's no date to record), while the sunrise itself still runs, since it's `millis()`-driven, not date-driven.
 
 ### `sunrise()` color math
 
 Unchanged from `SRM_Sunrise_NonBlocking.ino` / `SRM_Sunrise_ESP32.ino`:
-- 512 steps over `SUNRISE_MINUTES`, advanced via FastLED's `EVERY_N_MILLISECONDS_I` timer macro.
+- 512 steps, advanced via a step timer.
 - Hue: 0 (red) → 45 (yellow-orange).
 - Saturation: 255 → 180.
 - Brightness: quadratic ease, `progress² / 255`.
 
-Difference from the other sketches: `currentStep` lives at file scope (not `static` inside the function), so `updateScheduler()` can reset it to 0 on each new alarm firing.
+Two structural differences from the other sketches:
+- `currentStep` lives at file scope (not `static` inside the function), so `beginSunrise()` can reset it to 0 on each new firing.
+- The step timer (`sunriseTimer`) is a file-scope `CEveryNMillis` object, declared directly rather than via FastLED's `EVERY_N_MILLISECONDS_I` macro. The macro creates a *function-local* static timer that can't be reached from outside `sunrise()` — declaring the class directly lets `beginSunrise()` call `sunriseTimer.setPeriod()`/`.reset()` to retune it for the current runtime `sunriseMinutes`, since that value can change via the web form and a `static`-initialized-once timer wouldn't pick up the change.
 
 ### Persistence (NVS, namespace `"sunrise"`)
 
-| Key | Type | Range |
+| Key pattern | Type | Meaning |
 |---|---|---|
-| `alarmHour` | uint8 | 0–23 |
-| `alarmMinute` | uint8 | 0–59 |
-| `alarmDays` | uint8 bitmask | bit0=Sunday … bit6=Saturday (matches `struct tm.tm_wday`) |
-| `alarmEnabled` | bool | — |
+| `d0h`…`d6h` | uint8 (0–23) | Per-day hour, one key per day of week |
+| `d0m`…`d6m` | uint8 (0–59) | Per-day minute |
+| `d0e`…`d6e` | bool | Per-day enabled |
+| `sunriseMinutes` | uint16 | Sunrise ramp duration |
+| `holdMinutes` | uint8 | 0–120, minutes to hold the final color before auto-off |
 
-Written only when the web form is submitted (`handleSet()`). Survives reboot and power loss. `lastFiredYday` is **not** persisted — it lives in RAM only and resets to `-1` on every boot.
+Keys for the 7 days are built programmatically (`"d" + i + "h"`, etc.) in a loop rather than hand-written. Written only when the web form is submitted (`handleSet()` → `saveAlarmSettings()`). Survives reboot and power loss. `lastFiredYday` is **not** persisted — it lives in RAM only and resets to `-1` on every boot.
 
 ## Web interface
 
@@ -139,12 +134,20 @@ Written only when the web form is submitted (`handleSet()`). Survives reboot and
 Returns an HTML status/config page showing:
 - Current local time (or "not synced yet" if NTP hasn't succeeded)
 - WiFi status (IP address, or "disconnected")
+- The mDNS address (`http://sunrise-light.local/`)
 - Sunrise state (`Waiting` / `Running` / `Holding`) and progress percentage (0 in `WAITING`, `currentStep/511` in `RUNNING`, 100 in `HOLD`)
-- A form (posts to `/set`) with: hour number input (0–23), minute number input (0–59), seven day checkboxes (Sun–Sat), an enabled checkbox, and a submit button. Fields are pre-filled with current values.
+- A standalone **Start Now** button (its own form, posts to `/start`)
+- A settings form (posts to `/set`) with:
+  - **Timing**: sunrise duration in minutes (with a short explanation of what it means), and hold-before-auto-off in minutes (0–120)
+  - **Schedule**: one row per day of the week (Sun…Sat), each with an enabled checkbox, hour input, and minute input, pre-filled with current values
 
 ### `POST /set`
 
-Reads form fields `hour`, `minute`, `day0`…`day6` (checkbox presence = that day is set), `enabled` (checkbox presence = true). Clamps `hour` to ≤23 and `minute` to ≤59 (no error is shown if out-of-range values were submitted — they're silently clamped). Builds the day bitmask from whichever `dayN` checkboxes were present. Saves to NVS and updates the in-RAM cache. Responds with a 303 redirect back to `/`.
+Reads `sunriseMinutes` (clamped to a minimum of 1 — no upper cap), `holdMinutes` (clamped to a maximum of 120), and for each of the 7 days, `dNh`/`dNm`/`dNe` (hour clamped ≤23, minute clamped ≤59, `dNe` checkbox presence = enabled). Saves everything to NVS in one transaction (`saveAlarmSettings()`) and updates the in-RAM cache. Responds with a 303 redirect back to `/`.
+
+### `POST /start`
+
+Calls `beginSunrise()` — immediately starts a sunrise regardless of current state or schedule, using the current `sunriseMinutes`. Responds with a 303 redirect back to `/`.
 
 ### Anything else
 
@@ -152,19 +155,19 @@ Any other path returns `404 Not found` (plain text).
 
 ## Fails-safe behavior (known limitations, not bugs)
 
-- **No WiFi at boot**: sketch continues; `/` reports "disconnected" and "not synced yet"; scheduler never matches (no time available), so it simply never fires. No crash, no retry — WiFi is only attempted once, in `setup()`.
-- **NTP sync fails**: same outcome as above — waits forever for a first successful `getLocalTime()` read before the scheduler can do anything.
-- **Alarm already fired today, then board reboots**: `lastFiredYday` resets to `-1` in RAM, so if the alarm's hour/minute is reached again the same day post-reboot, it **will** fire a second time that day.
+- **No WiFi at boot**: sketch continues; `/` reports "disconnected" and "not synced yet"; the `WAITING` schedule check never runs (no time available), so nothing fires on schedule. Manually pressing **Start Now** still works, since running a sunrise doesn't need wall-clock time. WiFi is only attempted once, in `setup()` — no retry/reconnect loop.
+- **NTP sync fails**: same effect as no WiFi — the schedule can't evaluate, but a `RUNNING`/`HOLD` sunrise already in progress, or one started manually, proceeds and completes normally.
+- **Alarm already fired today, then board reboots**: `lastFiredYday` resets to `-1` in RAM, so if that day's alarm time is reached again post-reboot, it **will** fire a second time that day.
 - **Missed the exact trigger minute** (e.g. board busy or rebooting during that minute): no catch-up; waits for the next scheduled day.
 
-## Explicitly out of scope (v1)
+## Explicitly out of scope (current implementation)
 
 - Bluetooth/BLE interface.
 - RTC hardware module (DS3231 or similar) — time comes from NTP only.
-- WiFi credential provisioning via captive portal / WiFiManager — credentials are hardcoded in the sketch.
+- WiFi credential provisioning without source-code access — **proposed as v3 above**, not yet implemented. Credentials currently require editing `wifi_secrets.h` and reflashing.
 - WiFi reconnect/retry loop after the initial boot-time attempt.
-- One-shot (non-recurring) alarms — every enabled alarm repeats weekly on its selected days.
+- One-shot (non-recurring) alarms — every enabled day repeats weekly.
 
 ## Verification checklist (real hardware)
 
-See `_plans/wifi-scheduled-sunrise.md` for the full 9-step hardware test plan (WiFi connect, NTP accuracy incl. DST, web form round-trip, correct-day/wrong-day firing, NVS persistence across power-cycle, LED hold with no flicker, responsiveness while `RUNNING`, and day-rollover re-arm).
+See `_plans/wifi-scheduled-sunrise.md` for the full hardware test plan (WiFi connect, NTP accuracy incl. DST, web form round-trip including Start Now, correct-day/wrong-day firing, NVS persistence across power-cycle, LED hold with no flicker and correct auto-off timing, responsiveness while `RUNNING`, and mDNS resolution) plus the additional v3 tests once that's implemented.
