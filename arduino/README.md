@@ -62,6 +62,9 @@ arduino/
 - Zigbee smart outlet + SmartThings
 - 3D printed enclosures + IKEA Fado lamp
 
+![Arduino Nano connected to Pixel Ring](../docs/images/Arduino_Nano_Pixel_Ring.jpg)
+*Arduino Nano wired to 24-pixel WS2812B LED ring with 3D printed diffuser*
+
 Total cost: $15-30
 
 📋 **[Full hardware guide](../docs/Arduino+Hardware.md)**
@@ -74,6 +77,9 @@ Total cost: $15-30
 - 💡 **Visible from start:** 5% minimum brightness
 - 🔧 **Easy customization:** All settings in code
 - 🏠 **Smart home ready:** Works with any smart outlet
+
+![Sunrise with diffuser](../docs/media/arduino_sunrise_diffused.gif)
+*Smooth sunrise simulation with diffused light - gentle wake-up lighting*
 
 ## Comparison: Smooth vs Non-Blocking
 

@@ -13,6 +13,9 @@ This guide covers the hardware components and wiring for the Arduino-based sunri
   - Compatible clones work great (CH340 chip)
   - **Note:** Can also use ESP32, ESP8266, or other Arduino-compatible boards
 
+![Arduino Nano in 3D printed case](images/Arduino_Nano.jpg)
+*Arduino Nano clone in a 3D printed protective case*
+
 #### LEDs
 Choose ONE of these options:
 
@@ -95,6 +98,9 @@ Arduino Nano              WS2812B LED Ring/Strip
 | GND | GND / Ground | Common ground |
 | 5V | 5V / VCC | Power supply |
 
+![Arduino Nano connected to Pixel Ring](images/Arduino_Nano_Pixel_Ring.jpg)
+*Actual wiring: Arduino Nano connected to 24-pixel WS2812B LED ring with 3D printed diffuser*
+
 **Important Notes:**
 - Data pin is configurable in code (`#define DATA_PIN 9`)
 - Keep data wire as short as possible (< 6 inches ideal)
@@ -175,6 +181,9 @@ Arduino Nano              WS2812B LED Ring/Strip
 - **Standard USB cable** (Mini-USB to USB-A)
 - **Zigbee Smart Outlet** (controlled by Samsung SmartThings)
 
+![Complete setup - Pixel Ring with Arduino Nano](images/Pixel_Ring.jpg)
+*Steve's complete hardware setup: 24-pixel LED ring with 3D printed diffuser, connected to Arduino Nano in protective case*
+
 ### How It Works
 
 ```
@@ -201,6 +210,11 @@ Samsung SmartThings Hub
 4. Sunrise sketch starts automatically
 5. LEDs gradually transition: Deep red → Orange → Golden yellow
 6. After 30 minutes: Full brightness, ready to wake up!
+
+### See It In Action
+
+![Sunrise simulation in dark room](media/arduino_sunrise_dark.gif)
+*The sunrise simulation gradually brightening in a dark room - simulates natural dawn light*
 
 ### SmartThings Setup
 
@@ -355,6 +369,11 @@ void loop() {
 - White acrylic sheet (1/8" thick)
 - Sand one side with fine sandpaper for diffusion
 - Or use frosted contact paper on clear acrylic
+
+### Diffused Light Result
+
+![Sunrise with diffuser](media/arduino_sunrise_diffused.gif)
+*The sunrise effect with a diffuser creates soft, even light distribution - much easier on the eyes!*
 
 ---
 
