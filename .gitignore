@@ -1,0 +1,3 @@
+# WiFi credentials - never commit real secrets. See wifi_secrets.h.example
+# in each sketch folder for the template.
+wifi_secrets.h

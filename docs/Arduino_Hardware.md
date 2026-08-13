@@ -242,6 +242,10 @@ Samsung SmartThings Hub
 - **For 24-LED ring:** USB power is adequate ✅
 - **For 60+ LEDs:** Use external 5V 3A+ power supply
 
+### ⚠️ Power setup for `SRM_Sunrise_Scheduled.ino`
+
+The WiFi-scheduled variant (`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`) needs to stay powered **continuously** so it can hold its WiFi connection and NTP-synced clock and watch for its own alarm time. Plug it into a wall adapter or always-on USB power — **not** the smart outlet described above, since that outlet's whole job (cutting power on a schedule) is what this variant replaces. The smart-outlet-scheduling setup above still applies to the other sketches (`SRM_Sunrise_Smooth.ino`, `SRM_Sunrise_NonBlocking.ino`, `SRM_Sunrise_ESP32.ino`).
+
 ---
 
 ## 🔧 Troubleshooting
