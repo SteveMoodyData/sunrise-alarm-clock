@@ -9,7 +9,7 @@
 #define SUNRISE_MINUTES 30
 
 
-// ESP-WROOM-32 dev boards have no D9 (that's a Nano-only silkscreen label).
+// ESP32 dev boards have no D9 (that's a Nano-only silkscreen label).
 // GPIO18 is a safe general-purpose output: not a strapping pin (0/2/12/15),
 // not flash-connected (6-11), and not input-only (34-39).
 #define DATA_PIN 18

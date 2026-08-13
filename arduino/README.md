@@ -6,13 +6,17 @@ This folder contains Arduino-based implementations of the sunrise alarm clock.
 
 ```
 arduino/
-└── standalone/          ← All Arduino sketches are here
-    ├── README.md        ← Complete setup guide
-    ├── SRM_Sunrise_Smooth.ino (RECOMMENDED)
-    ├── SRM_Sunrise_NonBlocking.ino
-    ├── SRM_Sunrise_Test1.ino
-    └── SRM_Sunrise_Test2.ino
+└── standalone/                    ← All Arduino sketches are here
+    ├── README.md                  ← Complete setup guide
+    ├── SRM_Sunrise_Smooth/        (RECOMMENDED for Nano)
+    ├── SRM_Sunrise_NonBlocking/
+    ├── SRM_Sunrise_ESP32/         (ESP32 port of NonBlocking)
+    ├── SRM_Sunrise_Scheduled/     (ESP32 + WiFi scheduling - NEW)
+    ├── SRM_Sunrise_Test1/
+    └── SRM_Sunrise_Test2/
 ```
+
+Each sketch lives in its own folder matching the `.ino` filename - the Arduino IDE requires this (e.g. `SRM_Sunrise_Smooth/SRM_Sunrise_Smooth.ino`).
 
 ## 🚀 Get Started
 
@@ -20,7 +24,7 @@ arduino/
 
 ## Quick Links
 
-- **Hardware Setup:** [Arduino + Hardware Guide](../docs/Arduino+Hardware.md)
+- **Hardware Setup:** [Arduino Hardware Guide](../docs/Arduino_Hardware.md)
 - **Smart Home Integration:** [SmartThings Setup](../docs/smartthings_setup.md)
 - **Troubleshooting:** [Common Issues](../docs/troubleshooting.md)
 - **Back to Main:** [Project Overview](../README.md)
@@ -67,7 +71,7 @@ arduino/
 
 Total cost: $15-30
 
-📋 **[Full hardware guide](../docs/Arduino+Hardware.md)**
+📋 **[Full hardware guide](../docs/Arduino_Hardware.md)**
 
 ### Features
 
@@ -92,6 +96,19 @@ Total cost: $15-30
 | **Best for** | Most users | Advanced tinkerers |
 
 **Recommendation:** Start with **Smooth** version. Switch to Non-Blocking only if you want to add buttons, sensors, or other interactive features.
+
+## 📶 WiFi-Scheduled Option (ESP32)
+
+For ESP32 boards, `SRM_Sunrise_Scheduled.ino` replaces the smart-outlet-cuts-power trigger entirely: the board stays powered continuously, syncs time over WiFi (NTP), and manages its own alarm schedule instead. It adds:
+
+- An independent on/off/time alarm for **each day of the week** (e.g. weekdays at 6:30, weekends at 7:30, some days off)
+- A web page (reachable at `http://sunrise-light.local/` or by IP) to change the schedule, sunrise duration, and post-sunrise hold time without re-flashing
+- A **Start Now** button to trigger a sunrise on demand
+- Settings that persist across reboots
+
+**Trade-off:** it needs continuous power (a wall adapter, not the smart outlet) and a 2.4GHz WiFi network. If you'd rather keep the simple smart-outlet approach, use `SRM_Sunrise_ESP32.ino` instead - same hardware, no WiFi.
+
+📖 **[Full WiFi setup instructions](standalone/README.md)**
 
 ## Quick Start (3 Steps)
 
@@ -154,7 +171,7 @@ uint8_t brightness = map(progress, 0, 255, 26, 255);  // Brighter start
 ## Need Help?
 
 - 📖 **[Complete setup guide](standalone/README.md)**
-- 🔧 **[Hardware wiring](../docs/Arduino+Hardware.md)**
+- 🔧 **[Hardware wiring](../docs/Arduino_Hardware.md)**
 - 🐛 **[Troubleshooting](../docs/troubleshooting.md)**
 - 💬 **[Ask questions](https://github.com/SteveMoodyData/sunrise-alarm-clock/discussions)**
 - 🐞 **[Report issues](https://github.com/SteveMoodyData/sunrise-alarm-clock/issues)**

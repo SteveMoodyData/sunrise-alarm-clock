@@ -12,6 +12,7 @@ This guide covers the hardware components and wiring for the Arduino-based sunri
   - USB programmable
   - Compatible clones work great (CH340 chip)
   - **Note:** Can also use ESP32, ESP8266, or other Arduino-compatible boards
+  - **If you want the WiFi-scheduled variant** (`SRM_Sunrise_Scheduled.ino` - onboard weekly scheduling and a web UI instead of a smart outlet), you need an **ESP32 board specifically** - see `arduino/standalone/README.md` for setup
 
 ![Arduino Nano in 3D printed case](images/Arduino_Nano.jpg)
 *Arduino Nano clone in a 3D printed protective case*
@@ -175,6 +176,8 @@ Arduino Nano              WS2812B LED Ring/Strip
 
 ## 🏠 Smart Home Integration - Steve's Setup
 
+*This section covers the original smart-outlet approach (Nano/ESP32 + Zigbee outlet + SmartThings). If you'd rather the board manage its own weekly schedule over WiFi instead - no smart outlet needed - see `SRM_Sunrise_Scheduled.ino` in `arduino/standalone/README.md`.*
+
 ### Hardware Used
 - **Arduino Nano Clone** with CH340 USB chip
 - **24-pixel WS2812B 5050 RGB LED Ring**
@@ -256,9 +259,11 @@ Samsung SmartThings Hub
 - **For 24-LED ring:** USB power is adequate ✅
 - **For 60+ LEDs:** Use external 5V 3A+ power supply
 
-### ⚠️ Power setup for `SRM_Sunrise_Scheduled.ino`
+### ⚠️ Power and network setup for `SRM_Sunrise_Scheduled.ino`
 
 The WiFi-scheduled variant (`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`) needs to stay powered **continuously** so it can hold its WiFi connection and NTP-synced clock and watch for its own alarm time. Plug it into a wall adapter or always-on USB power — **not** the smart outlet described above, since that outlet's whole job (cutting power on a schedule) is what this variant replaces. The smart-outlet-scheduling setup above still applies to the other sketches (`SRM_Sunrise_Smooth.ino`, `SRM_Sunrise_NonBlocking.ino`, `SRM_Sunrise_ESP32.ino`).
+
+It also needs a **2.4GHz WiFi network with internet access** (for NTP time sync) - ESP32 hardware can't join 5GHz-only networks. Full setup steps (WiFi credentials, timezone, finding the web UI) are in `arduino/standalone/README.md`.
 
 ---
 

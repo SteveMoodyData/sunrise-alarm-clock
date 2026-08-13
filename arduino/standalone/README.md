@@ -24,6 +24,21 @@ This folder contains standalone Arduino sketches for the sunrise alarm clock. No
 - **Pros:** Can add buttons, sensors, display while sunrise runs
 - **Cons:** Slightly more complex code
 
+**`SRM_Sunrise_ESP32.ino`**
+- **Best for:** ESP32 boards that don't need WiFi
+- **Execution:** Non-blocking, same as `SRM_Sunrise_NonBlocking.ino`
+- Same color math and steps; only differs in `DATA_PIN` (GPIO 18, since ESP32 boards don't have a `D9` silkscreen label like the Nano) and a note about ESP32's 3.3V logic vs WS2812B's ~5V data threshold
+- **Pros:** Runs on ESP32 hardware, still works with the smart-outlet trigger model
+- **Cons:** No WiFi features - if you want scheduling/web control, use `SRM_Sunrise_Scheduled.ino` instead
+
+**`SRM_Sunrise_Scheduled.ino`** - 📶 **WiFi-connected, ESP32 only**
+- **Best for:** ESP32 users who want onboard scheduling and a web UI instead of a smart outlet
+- **Execution:** Non-blocking; connects to WiFi, syncs time via NTP, and serves a web page
+- **Steps:** Same 512-step color math as the other sketches
+- **Pros:** Independent alarm per day of the week, editable sunrise duration and hold time, manual "Start Now" trigger, settings survive reboot
+- **Cons:** Needs continuous power (not the smart outlet), needs a 2.4GHz WiFi network, more setup than the other sketches
+- See **[WiFi-Scheduled Sunrise setup](#-wifi-scheduled-sunrise-srm_sunrise_scheduledino)** below for full instructions
+
 **`SRM_Sunrise_Test1.ino`** (Original)
 - Legacy version with discrete color steps
 - 30-minute duration
@@ -33,6 +48,8 @@ This folder contains standalone Arduino sketches for the sunrise alarm clock. No
 - Legacy version with discrete color steps
 - 5-minute duration for testing
 - Kept for reference/history
+
+> **Note:** every sketch above lives in its own folder matching the `.ino` filename (e.g. `SRM_Sunrise_Smooth/SRM_Sunrise_Smooth.ino`) - the Arduino IDE requires this layout.
 
 ---
 
@@ -130,6 +147,39 @@ After uploading:
 4. Reaches full brightness at 30 minutes
 
 **If nothing happens, see Troubleshooting section below.**
+
+---
+
+## 📶 WiFi-Scheduled Sunrise (`SRM_Sunrise_Scheduled.ino`)
+
+This sketch is a different setup path from the sketches above - it needs an ESP32 board, WiFi, and continuous power, and manages its own alarm schedule instead of relying on a smart outlet.
+
+### What it adds
+
+- **Independent alarm per day of the week** - e.g. Mon/Wed/Fri at 6:30, Sat/Sun at 7:30, other days off
+- **Web page** at `http://sunrise-light.local/` (or the board's IP address) to view status and change settings without re-flashing
+- **Editable sunrise duration** and **hold time** (how long the light stays on before auto-off after the ramp finishes)
+- **Start Now button** to trigger a sunrise on demand, separate from the schedule
+- **Settings persist** across power loss/reboot (stored in the ESP32's flash, not just RAM)
+
+### Setup steps
+
+1. **Board:** Tools → Board → **ESP32 Dev Module** (not Arduino Nano). See the ESP32 board-package install steps in Step 1 above if you haven't added ESP32 support to the Arduino IDE yet.
+
+2. **WiFi credentials:** open the `SRM_Sunrise_Scheduled` folder - alongside the `.ino` file you'll find `wifi_secrets.h.example`. Copy it to `wifi_secrets.h` in that same folder, then edit it:
+   ```cpp
+   #define WIFI_SSID "your-network-name"
+   #define WIFI_PASSWORD "your-network-password"
+   ```
+   `wifi_secrets.h` is gitignored so your real credentials never get committed if this repo is under version control. ESP32 only supports **2.4GHz** WiFi - if your router broadcasts separate 2.4GHz/5GHz networks, use the 2.4GHz one.
+
+3. **Timezone:** in the sketch itself, set `TZ_STRING` to a POSIX TZ string for your location (examples for US Eastern/Pacific are in a comment right above it).
+
+4. **Upload**, then open the Serial Monitor at **115200 baud**. It'll print WiFi connection progress and, once connected, the board's IP address.
+
+5. **Wiring and power:** same LED wiring as the other sketches (`DATA_PIN` 18), but this variant needs to stay **continuously powered** - plug it into a wall adapter or always-on USB power, not the smart outlet. See [Hardware guide](../../docs/Arduino_Hardware.md) for details.
+
+6. **Access the web page:** from a phone or computer on the same WiFi network, go to `http://sunrise-light.local/` (works on macOS/iOS/Android out of the box; Windows may need Bonjour installed) or the IP address printed in Serial Monitor. From there you can set each day's alarm time, the sunrise duration, the hold time, and hit **Start Now** to test the LED sequence immediately.
 
 ---
 
@@ -448,9 +498,11 @@ See [SmartThings setup guide](../../docs/smartthings_setup.md) for:
 - Scheduling sunrise for weekdays only
 - Auto-shutoff after sunrise completes
 
+Prefer the board to manage its own schedule instead of a smart outlet? See [WiFi-Scheduled Sunrise](#-wifi-scheduled-sunrise-srm_sunrise_scheduledino) above - it covers per-day scheduling and auto-shutoff natively, no smart outlet required.
+
 ### Hardware Improvements
 
-See [Hardware guide](../../docs/Arduino+Hardware.md) for:
+See [Hardware guide](../../docs/Arduino_Hardware.md) for:
 - Enclosure options (3D printed, IKEA Fado lamp)
 - External power supply for more LEDs
 - Adding diffusers for better light distribution

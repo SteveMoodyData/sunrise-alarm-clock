@@ -26,7 +26,7 @@
 #define DEFAULT_SUNRISE_MINUTES 30
 #define DEFAULT_HOLD_MINUTES 60
 
-// ESP-WROOM-32 dev boards have no D9 (that's a Nano-only silkscreen label).
+// ESP32 dev boards have no D9 (that's a Nano-only silkscreen label).
 // GPIO18 is a safe general-purpose output; see SRM_Sunrise_ESP32.ino for why.
 #define DATA_PIN 18
 

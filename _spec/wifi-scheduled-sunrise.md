@@ -52,7 +52,7 @@ Resolved: **not** a fixed weekday/weekend split — each of the 7 days gets its 
 
 ## Requirements
 
-- ESP-WROOM-32 board (or compatible ESP32 dev board), selected as **ESP32 Dev Module** in Arduino IDE.
+- ESP32 dev board, selected as **ESP32 Dev Module** in Arduino IDE.
 - **Continuous power** (wall adapter / always-on USB). This sketch does not work with the smart-outlet-cuts-power model used by the other sketches — see `docs/Arduino_Hardware.md`.
 - WiFi network with internet access (for NTP). 2.4GHz only, per ESP32 hardware.
 - FastLED library (matches the rest of the repo; tested against 3.9.20 — avoid 3.10.3, see `CLAUDE.md`).

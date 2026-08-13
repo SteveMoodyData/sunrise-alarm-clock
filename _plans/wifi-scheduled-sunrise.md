@@ -2,7 +2,7 @@
 
 ## Context
 
-The sunrise clock currently has no way to schedule itself: a smart outlet cuts power to the ESP32 on an external schedule (SmartThings + Zigbee outlet), and the sketch just runs its 512-step color progression once on boot. The ESP32 board (`SRM_Sunrise_ESP32.ino`) was verified working on real ESP-WROOM-32 hardware — LED array confirmed good.
+The sunrise clock currently has no way to schedule itself: a smart outlet cuts power to the ESP32 on an external schedule (SmartThings + Zigbee outlet), and the sketch just runs its 512-step color progression once on boot. The ESP32 board (`SRM_Sunrise_ESP32.ino`) was verified working on real ESP32 hardware — LED array confirmed good.
 
 Decisions made building v1:
 - **WiFi only, no BLE** — WiFi gets free NTP time sync and a phone-browser-reachable web page with no companion app; BLE needs an actively-paired phone and no wall-clock reference of its own.
