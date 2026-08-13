@@ -1,35 +1,33 @@
 # Spec: WiFi-Scheduled Sunrise (`SRM_Sunrise_Scheduled.ino`)
 
-Describes the behavior of `arduino/standalone/SRM_Sunrise_Scheduled.ino`. Everything from "Purpose" through "Verification checklist" describes what's **currently implemented and working on real hardware**. The "Proposed changes (v3)" section right after "Purpose" describes a feature that's been reviewed but **not yet implemented**. For the design rationale behind these decisions, see `_plans/wifi-scheduled-sunrise.md`.
+Describes the behavior of `arduino/standalone/SRM_Sunrise_Scheduled.ino`. Everything below describes what's **currently implemented and working on real hardware** (v1 + v2 + Start Now + v3 WiFi provisioning). For the design rationale behind these decisions, see `_plans/wifi-scheduled-sunrise.md`.
 
 ## Purpose
 
-Runs the same 512-step sunrise color progression as the other sketches in this repo, but triggers it from an onboard per-day alarm schedule (set via a web page) instead of an external smart outlet cutting power, with an editable sunrise duration, an editable post-sunrise hold time, and a manual "Start Now" trigger.
+Runs the same 512-step sunrise color progression as the other sketches in this repo, but triggers it from an onboard per-day alarm schedule (set via a web page) instead of an external smart outlet cutting power, with an editable sunrise duration, an editable post-sunrise hold time, a manual "Start Now" trigger, and phone-based WiFi setup that needs no source-code or Arduino IDE access.
 
-## Proposed changes (v3 — pending review, not yet implemented)
+## WiFi setup without source-code access (captive portal provisioning)
 
-### WiFi setup without source-code access (captive portal provisioning)
-
-**Driver:** today, WiFi credentials live in `wifi_secrets.h`, a file the end user must hand-edit and reflash via Arduino IDE. That's fine for the person building the device, but not viable if it's gifted to someone with no access to the source code or dev tools — they need to be able to join their own network without any of that.
+**Driver:** WiFi credentials used to live in `wifi_secrets.h`, a file the end user had to hand-edit and reflash via Arduino IDE. That's fine for the person building the device, but not viable if it's gifted to someone with no access to the source code or dev tools — they need to be able to join their own network without any of that.
 
 - New external dependency: **`WiFiManager`** (tzapu/WiFiManager). This is the first dependency beyond FastLED — a deliberate, explicit departure from this repo's zero-extra-deps convention, justified because there's no reasonable way to build out-of-box WiFi setup on top of the ESP32 Arduino core alone.
-- `connectWiFi()` is replaced entirely. Instead of `WiFi.begin(WIFI_SSID, WIFI_PASSWORD)` against a fixed hardcoded network, it becomes `WiFiManager wm; wm.autoConnect(SETUP_AP_NAME)`. `autoConnect()` already implements the whole flow needed, with no custom logic required:
+- `connectWiFi()` no longer calls `WiFi.begin(WIFI_SSID, WIFI_PASSWORD)` against a fixed hardcoded network. Instead it's `WiFiManager wm; wm.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_S); wm.autoConnect(SETUP_AP_NAME)`. `autoConnect()` implements the whole flow:
   1. Tries previously-saved credentials (stored by WiFiManager in its own flash storage, separate from this sketch's `"sunrise"` Preferences namespace).
-  2. If that fails within its connect timeout, it automatically starts an AP + captive portal **on that same boot** — no separate fallback logic to write, this is the library's default behavior.
-  3. The recipient connects their phone to the broadcast network (default name via new constant `SETUP_AP_NAME`, e.g. `"sunrise-light-setup"`) using their phone's normal WiFi settings — no app required. A setup page (auto-popup or `192.168.4.1`) lists nearby networks; they pick theirs and enter the password.
+  2. If that fails within its connect timeout, it automatically starts an AP + captive portal **on that same boot** — no separate fallback logic needed, this is the library's default behavior.
+  3. The recipient connects their phone to the broadcast network (`SETUP_AP_NAME`, `"sunrise-light-setup"`) using their phone's normal WiFi settings — no app required. A setup page (auto-popup or `192.168.4.1`) lists nearby networks; they pick theirs and enter the password.
   4. Device reboots and joins that network; normal operation (web UI, mDNS, scheduler) proceeds as before.
-- `wifi_secrets.h` / `wifi_secrets.h.example` become **obsolete and are removed** for this sketch — WiFiManager owns credential storage now, so the `#include "wifi_secrets.h"` line and the `WIFI_SSID`/`WIFI_PASSWORD` `#define`s go away entirely. This is a real behavior change from the current setup, not just an addition on top of it.
-- `scanAndPrintNetworks()` (the temporary diagnostic added earlier to debug an SSID typo) becomes redundant, since WiFiManager's captive portal already scans and lists nearby networks itself. Candidate for removal.
+- `wifi_secrets.h` / `wifi_secrets.h.example` are **removed** — WiFiManager owns credential storage now. The `#include "wifi_secrets.h"` line and the `WIFI_SSID`/`WIFI_PASSWORD` `#define`s are gone from the sketch.
+- `scanAndPrintNetworks()` (the temporary diagnostic added earlier to debug an SSID typo) is **removed** — redundant now that WiFiManager's captive portal scans and lists nearby networks itself.
 
-**Re-provisioning — resolved with the user, no new hardware required:**
+**Re-provisioning, no new hardware required:**
 - **Auto-fallback**: free, via `autoConnect()`'s default behavior above. If the saved network becomes unreachable (moved house, changed router), the very next boot drops into the setup hotspot automatically — no custom retry-counter logic needed.
-- **Manual reset while still connected**: new `POST /reset-wifi` route (`handleResetWifi()`) that calls `wm.resetSettings()` then `ESP.restart()`. A new "Reset WiFi" button on the status page, next to the existing "Start Now" button, so someone can deliberately switch networks without first having to fail a connection.
+- **Manual reset while still connected**: `POST /reset-wifi` route (`handleResetWifi()`) that calls `wm.resetSettings()` then `ESP.restart()`. A "Reset WiFi" button on the status page, next to "Start Now", asks for confirmation (JS `confirm()`) before submitting, since it forces an immediate reboot into setup mode.
 
 **Caveats:**
 1. While the captive portal is active (first boot with no saved creds, or right after a "Reset WiFi"), `setup()` blocks inside `wm.autoConnect()` until the user finishes setup or the config portal timeout elapses — LEDs, NTP sync, and the normal web server are all on hold during that window. This is a deliberate, bounded exception to the sketch's otherwise non-blocking philosophy, scoped only to rare setup events, never normal runtime.
-2. A config portal timeout should be set (proposed: a few minutes) so the device doesn't block forever if nobody finishes setup — consistent with the existing fails-safe philosophy of continuing to boot rather than hanging. If it times out unconfigured, the board proceeds with no WiFi, same as today's behavior when WiFi never connects; the recipient would need to power-cycle to get the portal to try again. **Open question:** is a bounded timeout-then-continue the right call here, or should the portal stay open indefinitely until configured, given there's no physical button to reopen it later? Leaning toward a timeout (so a stray "Reset WiFi" tap doesn't strand the device with literally no way back if someone walks away), but flagging since it trades against "the portal is the only path back to a working device."
+2. Config portal timeout is **`WIFI_CONFIG_PORTAL_TIMEOUT_S`, 180 seconds (3 minutes)**. Resolved in favor of a bounded timeout over staying open indefinitely: since there's no physical reset button, an indefinitely-open portal after a stray "Reset WiFi" tap (with nobody around to finish setup) would strand the device with no path back except a power-cycle anyway — a timeout doesn't make that worse, and it keeps the fails-safe behavior consistent with the rest of the sketch (continue booting, don't hang). If it times out unconfigured, the board proceeds with no WiFi, same as v1/v2's behavior when WiFi never connected; the recipient would need to power-cycle to get the portal to try again.
 3. During the portal, the device isn't reachable at `sunrise-light.local` or its normal IP — only at the setup AP's own address (typically `192.168.4.1`).
-4. Credentials live in WiFiManager's own storage now rather than anywhere visible in this sketch's own NVS namespace or web UI. There's no new "show current SSID" affordance needed though — the status page's existing `WiFi.SSID()`/`WiFi.localIP()` display keeps working regardless of how the connection was configured.
+4. Credentials live in WiFiManager's own storage now rather than anywhere visible in this sketch's own NVS namespace or web UI. There's no "show current SSID" affordance needed though — the status page's existing `WiFi.SSID()`/`WiFi.localIP()` display keeps working regardless of how the connection was configured.
 
 ## Requirements
 
@@ -37,8 +35,9 @@ Runs the same 512-step sunrise color progression as the other sketches in this r
 - **Continuous power** (wall adapter / always-on USB). This sketch does not work with the smart-outlet-cuts-power model used by the other sketches — see `docs/Arduino_Hardware.md`.
 - WiFi network with internet access (for NTP). 2.4GHz only, per ESP32 hardware.
 - FastLED library (matches the rest of the repo; tested against 3.9.20 — avoid 3.10.3, see `CLAUDE.md`).
+- **WiFiManager** (tzapu/WiFiManager) — installed via Arduino Library Manager. The only dependency in this repo beyond FastLED; provides the captive-portal WiFi setup flow below.
 - `WiFi.h`, `WebServer.h`, `Preferences.h`, `ESPmDNS.h`, `time.h` — all ship with the ESP32 Arduino core, no extra libraries to install.
-- A `wifi_secrets.h` file in the sketch folder (gitignored, not committed) with real `WIFI_SSID`/`WIFI_PASSWORD` values — copy `wifi_secrets.h.example` and fill it in before flashing. (The v3 proposal above would remove this requirement entirely.)
+- No credentials file needed — WiFi network selection happens on-device via the captive portal (see below), not by editing source code.
 
 ## Configuration (`#define` block, top of file)
 
@@ -48,8 +47,8 @@ Runs the same 512-step sunrise color progression as the other sketches in this r
 | `DEFAULT_SUNRISE_MINUTES` | 30 | First-boot fallback only — the runtime value (`sunriseMinutes`, web-editable) comes from NVS once set |
 | `DEFAULT_HOLD_MINUTES` | 60 | First-boot fallback only — the runtime value (`holdMinutes`, web-editable, range 0–120) comes from NVS once set |
 | `DATA_PIN` | 18 | LED data GPIO |
-| `WIFI_SSID` / `WIFI_PASSWORD` | — | Not defined in this file — come from `wifi_secrets.h` (gitignored), included near the top |
-| `WIFI_CONNECT_TIMEOUT_MS` | 15000 | Max time `setup()` waits for WiFi before giving up and continuing offline |
+| `SETUP_AP_NAME` | `"sunrise-light-setup"` | WiFi network name broadcast by the captive portal when no saved network is available |
+| `WIFI_CONFIG_PORTAL_TIMEOUT_S` | 180 | Max seconds the captive portal stays open before giving up and continuing offline |
 | `MDNS_HOSTNAME` | `"sunrise-light"` | Bare hostname only, no `.local` suffix — see in-code comment for why |
 | `TZ_STRING` | `"PST8PDT,M3.2.0,M11.1.0"` | POSIX TZ string; must be edited for your timezone |
 | `NTP_SERVER` | `"pool.ntp.org"` | NTP source |
@@ -63,15 +62,13 @@ Compile-time defaults for the per-day schedule itself (used only until the web f
 ### Boot sequence (`setup()`)
 
 1. LEDs initialized and set to black.
-2. `connectWiFi()` — prints a scan of every visible network (temporary diagnostic, see below), then connects to `WIFI_SSID`/`WIFI_PASSWORD` from `wifi_secrets.h`; blocks up to `WIFI_CONNECT_TIMEOUT_MS`, then proceeds regardless of outcome (does not halt on failure).
+2. `connectWiFi()` — `WiFiManager::autoConnect(SETUP_AP_NAME)` tries the previously-saved network; if that fails, opens the `sunrise-light-setup` captive portal for up to `WIFI_CONFIG_PORTAL_TIMEOUT_S` (180s), blocking `setup()` for that entire window; then proceeds regardless of outcome (does not halt on failure or timeout).
 3. `startMDNS()` — no-ops if WiFi didn't connect; otherwise starts the mDNS responder so the device is reachable at `http://sunrise-light.local/`.
 4. `syncTime()` — no-ops if WiFi didn't connect; otherwise calls `configTzTime()` and polls `getLocalTime()` up to `NTP_SYNC_TIMEOUT_MS`.
 5. `loadAlarmSettings()` — reads the per-day schedule plus `sunriseMinutes`/`holdMinutes` from NVS namespace `"sunrise"`, falling back to the compile-time defaults above if unset.
 6. Web routes registered, server started.
 
-If WiFi or NTP fail, boot still completes — see "Fails-safe behavior" below.
-
-**Temporary diagnostic:** `scanAndPrintNetworks()`, called at the start of `connectWiFi()`, prints every WiFi network the board can see (SSID, signal strength, open/secured) to Serial before attempting to connect. Left in from debugging an earlier SSID typo; marked in-code as removable once no longer needed.
+If WiFi, the captive portal, or NTP fail, boot still completes — see "Fails-safe behavior" below.
 
 ### Main loop
 
@@ -137,6 +134,7 @@ Returns an HTML status/config page showing:
 - The mDNS address (`http://sunrise-light.local/`)
 - Sunrise state (`Waiting` / `Running` / `Holding`) and progress percentage (0 in `WAITING`, `currentStep/511` in `RUNNING`, 100 in `HOLD`)
 - A standalone **Start Now** button (its own form, posts to `/start`)
+- A standalone **Reset WiFi** button (its own form, posts to `/reset-wifi`, with a JS confirm prompt since it forces an immediate reboot into setup mode)
 - A settings form (posts to `/set`) with:
   - **Timing**: sunrise duration in minutes (with a short explanation of what it means), and hold-before-auto-off in minutes (0–120)
   - **Schedule**: one row per day of the week (Sun…Sat), each with an enabled checkbox, hour input, and minute input, pre-filled with current values
@@ -149,13 +147,17 @@ Reads `sunriseMinutes` (clamped to a minimum of 1 — no upper cap), `holdMinute
 
 Calls `beginSunrise()` — immediately starts a sunrise regardless of current state or schedule, using the current `sunriseMinutes`. Responds with a 303 redirect back to `/`.
 
+### `POST /reset-wifi`
+
+Calls `WiFiManager::resetSettings()` to forget the saved network, sends a plain-text confirmation, then `ESP.restart()`s after a 1s delay. On reboot, `autoConnect()` finds no saved credentials and immediately opens the `sunrise-light-setup` captive portal.
+
 ### Anything else
 
 Any other path returns `404 Not found` (plain text).
 
 ## Fails-safe behavior (known limitations, not bugs)
 
-- **No WiFi at boot**: sketch continues; `/` reports "disconnected" and "not synced yet"; the `WAITING` schedule check never runs (no time available), so nothing fires on schedule. Manually pressing **Start Now** still works, since running a sunrise doesn't need wall-clock time. WiFi is only attempted once, in `setup()` — no retry/reconnect loop.
+- **No WiFi at boot (portal times out or nobody configures it)**: sketch continues; `/` reports "disconnected" and "not synced yet"; the `WAITING` schedule check never runs (no time available), so nothing fires on schedule. Manually pressing **Start Now** still works, since running a sunrise doesn't need wall-clock time. A power-cycle is needed to make the captive portal try again.
 - **NTP sync fails**: same effect as no WiFi — the schedule can't evaluate, but a `RUNNING`/`HOLD` sunrise already in progress, or one started manually, proceeds and completes normally.
 - **Alarm already fired today, then board reboots**: `lastFiredYday` resets to `-1` in RAM, so if that day's alarm time is reached again post-reboot, it **will** fire a second time that day.
 - **Missed the exact trigger minute** (e.g. board busy or rebooting during that minute): no catch-up; waits for the next scheduled day.
@@ -164,10 +166,10 @@ Any other path returns `404 Not found` (plain text).
 
 - Bluetooth/BLE interface.
 - RTC hardware module (DS3231 or similar) — time comes from NTP only.
-- WiFi credential provisioning without source-code access — **proposed as v3 above**, not yet implemented. Credentials currently require editing `wifi_secrets.h` and reflashing.
-- WiFi reconnect/retry loop after the initial boot-time attempt.
+- WiFi reconnect/retry loop after the initial boot-time attempt (`autoConnect()`'s own saved-credential retry only, no continuous background reconnect).
 - One-shot (non-recurring) alarms — every enabled day repeats weekly.
+- Physical reset button for WiFi provisioning — re-provisioning is web-button (`/reset-wifi`) or automatic fallback only.
 
 ## Verification checklist (real hardware)
 
-See `_plans/wifi-scheduled-sunrise.md` for the full hardware test plan (WiFi connect, NTP accuracy incl. DST, web form round-trip including Start Now, correct-day/wrong-day firing, NVS persistence across power-cycle, LED hold with no flicker and correct auto-off timing, responsiveness while `RUNNING`, and mDNS resolution) plus the additional v3 tests once that's implemented.
+See `_plans/wifi-scheduled-sunrise.md` for the full hardware test plan (WiFi captive-portal setup and reset, NTP accuracy incl. DST, web form round-trip including Start Now, correct-day/wrong-day firing, NVS persistence across power-cycle, LED hold with no flicker and correct auto-off timing, responsiveness while `RUNNING`, and mDNS resolution).

@@ -11,7 +11,7 @@ Decisions made building v1:
 
 ## Status
 
-**v1 and v2 are both implemented, pushed, and confirmed working on real hardware.** v3 (below) is proposed and reviewed but not yet implemented — the sections up through "v3" describe what's actually running on the device today; treat them as a build record, not a to-do list.
+**v1, v2, and v3 are all implemented and pushed.** This whole document is a build record, not a to-do list. v3 (AP-mode + captive portal WiFi provisioning) has not yet been verified on real hardware — see the "Verification (real hardware) — additions" checklist under the v3 section, items 14-17.
 
 **v2 shipped these four additions** on top of the working v1 code, requested after v1 was confirmed working and reviewed/resolved against the user in `_spec/wifi-scheduled-sunrise.md`:
 1. mDNS hostname (`sunrise-light.local`)
@@ -116,7 +116,7 @@ Two changes landed after the v2 work above but before v3 was proposed — not or
 
 **Fails-safe time fix:** implementing Start Now surfaced a real bug in the original v2 design — `updateScheduler()` had a single `if (!getLocalTime(&now, 0)) return;` guard at the top of the function, before the state-machine `switch`. That meant if NTP hadn't synced (or ever failed to), the entire scheduler did nothing at all, including advancing an already-`RUNNING` or already-`HOLD`ing sunrise — even though `RUNNING`/`HOLD` are driven by `millis()`, not wall-clock time, and never actually needed `now`. Fixed by moving the `getLocalTime()` call inside the `WAITING` case only, so a sunrise (whether scheduled or manually started) now runs and holds correctly regardless of NTP status; only the schedule-matching check genuinely needs the clock.
 
-## v3: AP-mode + captive portal WiFi provisioning (pending review, not yet implemented)
+## v3: AP-mode + captive portal WiFi provisioning (implemented, pushed; hardware verification pending)
 
 **Driver:** the device needs to be set up on a new WiFi network by someone with no access to the source code or Arduino IDE (e.g. built and gifted to someone else). Already reviewed with the user:
 - Uses the community-standard `WiFiManager` library (tzapu/WiFiManager) rather than hand-rolling AP mode + DNS redirect + HTML forms — the first external dependency beyond FastLED, a deliberate exception to this repo's normal no-new-deps convention.
@@ -134,16 +134,17 @@ SETUP_AP_NAME   // "sunrise-light-setup" - WiFi network name broadcast while in 
 
 ### Removed
 
-- `#include "wifi_secrets.h"` and the `WIFI_SSID`/`WIFI_PASSWORD` `#define`s (credentials now owned by WiFiManager's own storage, not this sketch).
-- `arduino/standalone/SRM_Sunrise_Scheduled/wifi_secrets.h` and `wifi_secrets.h.example` - delete both. (`.gitignore`'s `wifi_secrets.h` entry can stay - harmless once unused - or be cleaned up as a trivial follow-up.)
-- `scanAndPrintNetworks()` - redundant once WiFiManager's own portal scans and lists networks; remove unless still wanted for Serial-monitor debugging independent of the portal.
+- `#include "wifi_secrets.h"` and the `WIFI_SSID`/`WIFI_PASSWORD` `#define`s (credentials now owned by WiFiManager's own storage, not this sketch). Done.
+- `arduino/standalone/SRM_Sunrise_Scheduled/wifi_secrets.h` and `wifi_secrets.h.example` - both deleted (`wifi_secrets.h.example` via `git rm`, `wifi_secrets.h` was already gitignored). `.gitignore`'s `wifi_secrets.h` entry was left in place - harmless now that it's unused.
+- `scanAndPrintNetworks()` - removed; redundant once WiFiManager's own portal scans and lists networks.
+- `WIFI_CONNECT_TIMEOUT_MS` (the old polling-loop timeout) - removed, replaced by `WIFI_CONFIG_PORTAL_TIMEOUT_S`.
 
-### `connectWiFi()` — rewritten
+### `connectWiFi()` — as shipped
 
 ```cpp
 void connectWiFi() {
   WiFiManager wm;
-  wm.setConfigPortalTimeout(180); // seconds; falls through to offline fails-safe if nobody completes setup
+  wm.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_S); // 180s; falls through to offline fails-safe if nobody completes setup
   bool connected = wm.autoConnect(SETUP_AP_NAME);
 
   if (connected) {
@@ -155,7 +156,7 @@ void connectWiFi() {
 }
 ```
 
-Replaces the current fixed-credential `WiFi.begin(WIFI_SSID, WIFI_PASSWORD)` + polling loop entirely. `autoConnect()` internally handles: try saved creds → on failure, start AP + captive portal → block until connected or `setConfigPortalTimeout()` elapses. `WIFI_CONNECT_TIMEOUT_MS` (the old polling-loop timeout) becomes unused and can be removed.
+Replaced the old fixed-credential `WiFi.begin(WIFI_SSID, WIFI_PASSWORD)` + polling loop entirely. `autoConnect()` internally handles: try saved creds → on failure, start AP + captive portal → block until connected or `setConfigPortalTimeout()` elapses.
 
 ### New route: `POST /reset-wifi` → `handleResetWifi()`
 
@@ -169,26 +170,27 @@ void handleResetWifi() {
 }
 ```
 
-Register in `setup()`: `server.on("/reset-wifi", HTTP_POST, handleResetWifi);`. Add a "Reset WiFi" button/form to `handleRoot()`'s status section, next to the existing "Start Now" button.
+Registered in `setup()`: `server.on("/reset-wifi", HTTP_POST, handleResetWifi);`. A "Reset WiFi" button/form was added to `handleRoot()`'s status section, next to the existing "Start Now" button, with a JS `confirm()` prompt since it forces an immediate reboot into setup mode.
 
 ### Caveats (implementation framing, mirrors the spec)
 
 1. `wm.autoConnect()` blocks `setup()` until connected or timed out — only during first-time setup or right after a "Reset WiFi," never during normal runtime. Everything else in `setup()` (mDNS, NTP sync, loading alarm settings, starting the web server) still happens after this call returns, same relative order as today.
-2. Config portal timeout (proposed: 180s) means an incomplete setup falls through to the existing fails-safe offline behavior — board boots, LEDs stay off, scheduler never matches anything. The recipient would need to power-cycle to get the portal to try again.
+2. **Open question resolved:** `WIFI_CONFIG_PORTAL_TIMEOUT_S` is set to 180 (3 minutes) rather than staying open indefinitely. Reasoning: with no physical reset button, an indefinitely-open portal after a stray "Reset WiFi" tap (with nobody around to finish setup) strands the device just as hard as a timeout would - either way a power-cycle is the recovery path - so the bounded timeout was chosen to stay consistent with the sketch's existing fails-safe philosophy (continue booting rather than hang forever). An incomplete setup falls through to the existing fails-safe offline behavior — board boots, LEDs stay off, scheduler never matches anything. The recipient would need to power-cycle to get the portal to try again.
 3. While the setup AP is active, the device isn't reachable at `sunrise-light.local` or its normal IP — only at the setup AP's own address (typically `192.168.4.1`).
 
-### Verification (real hardware) — additions
+### Verification (real hardware) — additions, not yet run
 
 14. Fresh device (or right after "Reset WiFi"): confirm it broadcasts `sunrise-light-setup`; connecting a phone to it surfaces a setup page listing nearby networks; submitting real credentials reboots the device into normal operation on that network.
 15. Move a previously-configured device somewhere its saved network isn't reachable; confirm it automatically falls back into the setup hotspot on boot, with no manual reset needed.
 16. From the web UI while connected, use "Reset WiFi"; confirm the device restarts, forgets its network, and re-broadcasts the setup hotspot.
 17. Let the config portal time out without completing setup; confirm the board continues booting (LEDs off, no crash/hang) rather than blocking forever.
 
-### Files touched — additions to the existing list
+### Files touched — v3, done
 
-- **`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`** — `connectWiFi()` rewritten, new `/reset-wifi` route, `wifi_secrets.h` include and `scanAndPrintNetworks()` removed
+- **`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`** — `connectWiFi()` rewritten, new `/reset-wifi` route + button, `wifi_secrets.h` include and `scanAndPrintNetworks()` removed
 - **`arduino/standalone/SRM_Sunrise_Scheduled/wifi_secrets.h.example`** — deleted (and the real `wifi_secrets.h`, which was already gitignored)
-- **`arduino/standalone/README.md`** — the WiFi setup section needs rewriting to describe the captive-portal flow instead of the "copy `wifi_secrets.h.example`" step
+- **`arduino/standalone/README.md`** — WiFi setup section rewritten to describe the captive-portal flow instead of the "copy `wifi_secrets.h.example`" step
+- **`_spec/wifi-scheduled-sunrise.md`** — v3 section moved out of "proposed" framing into the main implemented-behavior description
 
 ## Verification (real hardware, as run against v1+v2)
 
@@ -213,4 +215,4 @@ Day-mask language replaced by per-day language versus the original v1 checklist,
 - **`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`** — implemented and pushed
 - **`docs/Arduino_Hardware.md`** — v1's continuous-power note still applies unchanged
 - **`CLAUDE.md`** — the sketch summary there doesn't enumerate individual fields, so v2 didn't require changes
-- **`_spec/wifi-scheduled-sunrise.md`** — kept in sync, now describes v1+v2 as implemented and v3 as proposed
+- **`_spec/wifi-scheduled-sunrise.md`** — kept in sync, now describes v1+v2+v3 as implemented

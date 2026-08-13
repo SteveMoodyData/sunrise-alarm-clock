@@ -1,14 +1,10 @@
 #include "FastLED.h"
 #include <WiFi.h>
+#include <WiFiManager.h>
 #include <WebServer.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <time.h>
-
-// WIFI_SSID / WIFI_PASSWORD are defined in wifi_secrets.h (gitignored, not
-// committed - see wifi_secrets.h.example in this same folder for the
-// template and setup instructions).
-#include "wifi_secrets.h"
 
 // ---------------------------------------------------------------------------
 // POWER SETUP CHANGE: unlike the other sketches in this repo, this variant
@@ -31,8 +27,15 @@
 #define DATA_PIN 18
 
 // --- WiFi ---
-// WIFI_SSID / WIFI_PASSWORD come from wifi_secrets.h, included above.
-#define WIFI_CONNECT_TIMEOUT_MS 15000
+// Credentials are no longer hardcoded here: WiFiManager owns them (its own
+// flash storage, separate from this sketch's "sunrise" Preferences
+// namespace). On first boot (or after a "Reset WiFi"), the device broadcasts
+// this network name and serves a captive-portal setup page.
+#define SETUP_AP_NAME "sunrise-light-setup"
+// How long the captive portal stays open before giving up and continuing
+// offline (same fails-safe philosophy as the rest of this sketch - see
+// connectWiFi()).
+#define WIFI_CONFIG_PORTAL_TIMEOUT_S 180
 
 // --- mDNS ---
 // Bare hostname only - do NOT include ".local" here. MDNS.begin() takes the
@@ -112,6 +115,7 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/set", HTTP_POST, handleSet);
   server.on("/start", HTTP_POST, handleStartNow);
+  server.on("/reset-wifi", HTTP_POST, handleResetWifi);
   server.onNotFound(handleNotFound);
   server.begin();
 }
@@ -122,47 +126,25 @@ void loop() {
   FastLED.show();
 }
 
-// TEMPORARY DIAGNOSTIC: lists every network the ESP32's radio can actually
-// see (name, signal strength, security type) before attempting to connect.
-// Remove this call once WiFi connect issues are resolved.
-void scanAndPrintNetworks() {
-  Serial.println("Scanning for WiFi networks...");
-  int count = WiFi.scanNetworks();
-  if (count == 0) {
-    Serial.println("  No networks found at all - check the board is powered/antenna is intact.");
-    return;
-  }
-  for (int i = 0; i < count; i++) {
-    Serial.printf("  [%2d] SSID: \"%s\"  RSSI: %d dBm  Encryption: %s\n",
-                  i, WiFi.SSID(i).c_str(), WiFi.RSSI(i),
-                  WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "open" : "secured");
-  }
-  Serial.println();
-}
-
+// Tries previously-saved credentials (WiFiManager's own storage) first. If
+// that fails, it automatically starts an AP + captive portal broadcasting
+// SETUP_AP_NAME - no separate fallback logic needed, this is autoConnect()'s
+// default behavior. Blocks setup() while the portal is open, but only during
+// first-time setup or right after a "Reset WiFi" - never during normal
+// runtime, since a successful reconnect to saved credentials is fast.
 void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  scanAndPrintNetworks();
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(WIFI_CONFIG_PORTAL_TIMEOUT_S);
+  bool connected = wm.autoConnect(SETUP_AP_NAME);
 
-  Serial.print("Connecting to WiFi");
-  uint32_t start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < WIFI_CONNECT_TIMEOUT_MS) {
-    delay(250);
-    Serial.print(".");
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println();
+  if (connected) {
     Serial.print("WiFi connected, IP: ");
     Serial.println(WiFi.localIP());
   } else {
     // Fails safe: no WiFi means no NTP time means the scheduler just never
-    // matches and never fires. It won't crash or block startup.
-    Serial.println();
-    Serial.print("WiFi connect timed out (status code ");
-    Serial.print(WiFi.status());
-    Serial.println(") - continuing without network.");
+    // matches and never fires. It won't crash or block startup. The portal
+    // timed out without anyone finishing setup - a power-cycle will try again.
+    Serial.println("WiFi setup portal timed out - continuing without network.");
   }
 }
 
@@ -358,6 +340,7 @@ void handleRoot() {
   html += "<p><b>Sunrise state:</b> " + stateName + " (" + String(progressPct) + "%)</p>";
 
   html += "<form method='POST' action='/start'><input type='submit' value='Start Now'></form>";
+  html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('This forgets the saved WiFi network and restarts into setup mode. Continue?');\"><input type='submit' value='Reset WiFi'></form>";
 
   html += "<form method='POST' action='/set'>";
 
@@ -415,6 +398,18 @@ void handleStartNow() {
 
   server.sendHeader("Location", "/");
   server.send(303);
+}
+
+// Forgets the saved WiFi network (WiFiManager's own storage) and restarts.
+// On reboot, autoConnect() finds no saved credentials and immediately opens
+// the setup portal - lets someone deliberately switch networks without
+// first having to fail a connection to trigger the auto-fallback.
+void handleResetWifi() {
+  WiFiManager wm;
+  wm.resetSettings();
+  server.send(200, "text/plain", "WiFi settings cleared. Restarting...");
+  delay(1000);
+  ESP.restart();
 }
 
 void handleNotFound() {
