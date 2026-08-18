@@ -4,7 +4,7 @@
 #include <WebServer.h>
 #include <Preferences.h>
 #include <ESPmDNS.h>
-#include <time.h>
+#include <ezTime.h>
 
 // ---------------------------------------------------------------------------
 // POWER SETUP CHANGE: unlike the other sketches in this repo, this variant
@@ -19,8 +19,8 @@
 
 // First-boot fallback only - once the web form has been submitted once, the
 // runtime values (sunriseMinutes / holdMinutes below) come from NVS instead.
-#define DEFAULT_SUNRISE_MINUTES 30
-#define DEFAULT_HOLD_MINUTES 60
+#define DEFAULT_SUNRISE_MINUTES 3
+#define DEFAULT_HOLD_MINUTES 6
 
 // ESP32 dev boards have no D9 (that's a Nano-only silkscreen label).
 // GPIO18 is a safe general-purpose output; see SRM_Sunrise_ESP32.ino for why.
@@ -45,13 +45,14 @@
 #define MDNS_HOSTNAME "sunrise-light"
 
 // --- NTP / timezone ---
-// POSIX TZ string for your local timezone. Examples:
-//   US Eastern:  "EST5EDT,M3.2.0,M11.1.0"
-//   US Pacific:  "PST8PDT,M3.2.0,M11.1.0"
-// Find yours in the POSIX TZ database (search "POSIX TZ string" for your city).
-#define TZ_STRING "PST8PDT,M3.2.0,M11.1.0"
-#define NTP_SERVER "pool.ntp.org"
-#define NTP_SYNC_TIMEOUT_MS 15000
+// First-boot fallback only - once the web form has been submitted once (by
+// hand, via the dropdown, or via the "Detect from this device" button), the
+// runtime value (tzLocation below) comes from NVS instead. Any tz-database
+// location name works (e.g. "America/Los_Angeles", "Europe/London") - ezTime
+// resolves it (including the correct DST rule) via a lookup service, so no
+// POSIX TZ string needs to be typed or computed by hand anymore.
+#define DEFAULT_TZ_LOCATION "America/Los_Angeles"
+#define NTP_SYNC_TIMEOUT_S 15
 
 // --- Web server ---
 #define WEB_SERVER_PORT 80
@@ -90,14 +91,26 @@ bool dayEnabled[7]   = {false, false, false, false, false, false, false};
 uint16_t sunriseMinutes = DEFAULT_SUNRISE_MINUTES;
 uint8_t holdMinutes = DEFAULT_HOLD_MINUTES; // 0-120, clamped in handleSet()
 
+// ezTime's timezone object. Resolves a tz-database location name (below) to
+// the correct POSIX rule (DST included) via a lookup service, and keeps its
+// own NVS-backed cache (see syncTime()) so a later lookup failure falls back
+// to the last-known-good resolution instead of losing the correct time.
+Timezone myTZ;
+
+// Runtime-editable tz-database location name (web-configurable and
+// NVS-persisted, same pattern as sunriseMinutes/holdMinutes above). Settable
+// by hand, via the web UI's preset dropdown, or via "Detect from this
+// device" (reads the browser's own Intl.DateTimeFormat timezone).
+String tzLocation = DEFAULT_TZ_LOCATION;
+
 // Timestamp recorded on RUNNING->HOLD, used to time the auto-off.
 uint32_t holdStartMillis = 0;
 
 // Guards against firing more than once on the same calendar day. Intentionally
 // NOT persisted to NVS: if the board reboots mid-day after already firing
 // today, it's willing to fire again if the alarm time is reached again. Fine
-// for now - see plan notes.
-int16_t lastFiredYday = -1;
+// for now - see plan notes. -1 never matches myTZ.dayOfYear()'s 1-366 range.
+int32_t lastFiredYday = -1;
 
 void setup() {
   Serial.begin(115200);
@@ -109,8 +122,8 @@ void setup() {
 
   connectWiFi();
   startMDNS();
+  loadAlarmSettings(); // must run before syncTime() - it loads tzLocation
   syncTime();
-  loadAlarmSettings();
 
   server.on("/", HTTP_GET, handleRoot);
   server.on("/set", HTTP_POST, handleSet);
@@ -121,6 +134,7 @@ void setup() {
 }
 
 void loop() {
+  events(); // ezTime: services scheduled NTP refreshes - must be called regularly
   server.handleClient();
   updateScheduler();
   FastLED.show();
@@ -166,19 +180,24 @@ void startMDNS() {
 void syncTime() {
   if (WiFi.status() != WL_CONNECTED) return;
 
-  configTzTime(TZ_STRING, NTP_SERVER);
-
-  Serial.print("Syncing time");
-  struct tm timeinfo;
-  uint32_t start = millis();
-  while (!getLocalTime(&timeinfo, 100) && millis() - start < NTP_SYNC_TIMEOUT_MS) {
-    Serial.print(".");
+  // No myTZ.setCache() here: this ezTime build's NVS-backed cache overload
+  // is only compiled in when EZTIME_CACHE_NVS is defined ahead of the
+  // library's own ezTime.cpp - a sketch-level #define doesn't reach that
+  // separately-compiled translation unit, so it link-errors instead
+  // (confirmed via a real build). Not worth chasing further: a lookup
+  // failure just means no time this boot, same fails-safe behavior as
+  // every other network-dependent step in this sketch.
+  if (!myTZ.setLocation(tzLocation)) {
+    Serial.print("Timezone lookup failed for \"");
+    Serial.print(tzLocation);
+    Serial.print("\": ");
+    Serial.println(errorString());
   }
-  Serial.println();
 
-  if (getLocalTime(&timeinfo, 100)) {
-    Serial.print("Time synced: ");
-    Serial.println(&timeinfo, "%Y-%m-%d %H:%M:%S %Z");
+  Serial.print("Syncing time...");
+  if (waitForSync(NTP_SYNC_TIMEOUT_S)) {
+    Serial.print("synced: ");
+    Serial.println(myTZ.dateTime("Y-m-d H:i:s T"));
   } else {
     Serial.println("NTP sync timed out - scheduler will wait until time is available.");
   }
@@ -196,6 +215,7 @@ void loadAlarmSettings() {
 
   sunriseMinutes = prefs.getUShort("sunriseMinutes", sunriseMinutes);
   holdMinutes = prefs.getUChar("holdMinutes", holdMinutes);
+  tzLocation = prefs.getString("tzLocation", tzLocation);
 
   prefs.end();
 }
@@ -215,6 +235,7 @@ void saveAlarmSettings() {
 
   prefs.putUShort("sunriseMinutes", sunriseMinutes);
   prefs.putUChar("holdMinutes", holdMinutes);
+  prefs.putString("tzLocation", tzLocation);
 
   prefs.end();
 }
@@ -228,9 +249,8 @@ void saveAlarmSettings() {
 void beginSunrise() {
   currentStep = 0;
 
-  struct tm now;
-  if (getLocalTime(&now, 0)) {
-    lastFiredYday = now.tm_yday;
+  if (timeStatus() == timeSet) {
+    lastFiredYday = myTZ.dayOfYear();
   }
 
   uint16_t interval = (sunriseMinutes * 60000UL) / 512;
@@ -243,12 +263,19 @@ void beginSunrise() {
 void updateScheduler() {
   switch (currentState) {
     case WAITING: {
-      struct tm now;
-      if (!getLocalTime(&now, 0)) break; // no time yet, can't evaluate the schedule
+      if (timeStatus() != timeSet) break; // no time yet, can't evaluate the schedule
 
-      int wday = now.tm_wday;
-      bool timeMatches = (now.tm_hour == dayHour[wday]) && (now.tm_min == dayMinute[wday]);
-      bool notAlreadyFiredToday = (lastFiredYday != now.tm_yday);
+      // The installed ezTime build's dateTime("w") (and weekday(), which
+      // returns the same underlying value) actually output 1=Sunday..7=
+      // Saturday despite the library's own "0 = Sunday" comment - confirmed
+      // by reading ezTime.cpp's breakTime(), which sets tm.Wday = 1 for
+      // Sunday. Subtract 1 to get the 0=Sunday..6=Saturday range this
+      // sketch's dayHour[]/dayMinute[]/dayEnabled[] arrays are indexed by -
+      // without this, every day was checked against the wrong day's slot
+      // (and Saturday indexed one past the end of each 7-element array).
+      int wday = myTZ.dateTime("w").toInt() - 1;
+      bool timeMatches = (myTZ.hour() == dayHour[wday]) && (myTZ.minute() == dayMinute[wday]);
+      bool notAlreadyFiredToday = (lastFiredYday != (int32_t)myTZ.dayOfYear());
 
       if (dayEnabled[wday] && timeMatches && notAlreadyFiredToday) {
         beginSunrise();
@@ -314,9 +341,31 @@ void sunrise() {
 
 const char* dayNames[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
+// A small hand-picked set of common tz-database locations for the settings
+// form's dropdown - convenience only, not exhaustive. Any location name
+// (not just ones listed here) can still be typed into the text field or
+// filled in via "Detect from this device".
+struct TzPreset { const char* name; const char* label; };
+const TzPreset tzPresets[] = {
+  {"America/Los_Angeles", "US Pacific"},
+  {"America/Denver", "US Mountain"},
+  {"America/Chicago", "US Central"},
+  {"America/New_York", "US Eastern"},
+  {"America/Anchorage", "US Alaska"},
+  {"Pacific/Honolulu", "US Hawaii"},
+  {"America/Toronto", "Canada Eastern"},
+  {"America/Vancouver", "Canada Pacific"},
+  {"Europe/London", "UK"},
+  {"Europe/Paris", "Central Europe"},
+  {"Australia/Sydney", "Australia Eastern"},
+  {"Asia/Tokyo", "Japan"},
+  {"Asia/Kolkata", "India"},
+  {"UTC", "UTC"},
+};
+const int NUM_TZ_PRESETS = sizeof(tzPresets) / sizeof(tzPresets[0]);
+
 void handleRoot() {
-  struct tm now;
-  bool haveTime = getLocalTime(&now, 0);
+  bool haveTime = (timeStatus() == timeSet);
 
   String stateName = currentState == WAITING ? "Waiting" : currentState == RUNNING ? "Running" : "Holding";
   uint8_t progressPct = currentState == RUNNING ? (uint32_t)currentStep * 100 / 511 : (currentState == HOLD ? 100 : 0);
@@ -326,13 +375,7 @@ void handleRoot() {
   html += "<h1>Sunrise Alarm</h1>";
 
   html += "<p><b>Current time:</b> ";
-  if (haveTime) {
-    char buf[32];
-    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S %Z", &now);
-    html += buf;
-  } else {
-    html += "not synced yet";
-  }
+  html += haveTime ? myTZ.dateTime("Y-m-d H:i:s T") : String("not synced yet");
   html += "</p>";
 
   html += "<p><b>WiFi:</b> " + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("disconnected")) + "</p>";
@@ -347,7 +390,17 @@ void handleRoot() {
   html += "<h2>Timing</h2>";
   html += "<label>Sunrise duration (minutes): <input type='number' name='sunriseMinutes' min='1' value='" + String(sunriseMinutes) + "' style='width:4em'></label><br>";
   html += "<small>How long the light takes to fade from fully dark to fully bright once the scheduled time hits.</small><br><br>";
-  html += "<label>Hold before auto-off (minutes, 0-120): <input type='number' name='holdMinutes' min='0' max='120' value='" + String(holdMinutes) + "'></label><br>";
+  html += "<label>Hold before auto-off (minutes, 0-120): <input type='number' name='holdMinutes' min='0' max='120' value='" + String(holdMinutes) + "'></label><br><br>";
+
+  html += "<label>Timezone: <input type='text' id='tzLocation' name='tzLocation' value='" + tzLocation + "' style='width:22em' placeholder='e.g. America/Los_Angeles'></label> ";
+  html += "<button type='button' onclick='detectTimezone()'>Detect from this device</button><br>";
+  html += "<label>Or pick a common one: <select onchange=\"if(this.value)document.getElementById('tzLocation').value=this.value;\">";
+  html += "<option value=''>-- select --</option>";
+  for (int i = 0; i < NUM_TZ_PRESETS; i++) {
+    html += "<option value='" + String(tzPresets[i].name) + "'>" + tzPresets[i].label + "</option>";
+  }
+  html += "</select></label><br>";
+  html += "<small>Type any <a href='https://en.wikipedia.org/wiki/List_of_tz_database_time_zones' target='_blank'>tz database</a> location name, pick a common one above, or click Detect. The correct offset and DST rule are looked up automatically (needs WiFi) the next time this device syncs.</small><br>";
 
   html += "<h2>Schedule</h2>";
   for (int i = 0; i < 7; i++) {
@@ -358,6 +411,14 @@ void handleRoot() {
 
   html += "<br><input type='submit' value='Save'>";
   html += "</form>";
+
+  // Reads the browser's own resolved IANA timezone name directly - modern
+  // browsers already know this correctly (DST rules included), so no
+  // client-side guesswork is needed here. ezTime resolves this name to the
+  // right POSIX rule server-side once saved (see syncTime()/handleSet()).
+  html += "<script>";
+  html += "function detectTimezone(){document.getElementById('tzLocation').value=Intl.DateTimeFormat().resolvedOptions().timeZone;}";
+  html += "</script>";
 
   html += "</body></html>";
 
@@ -372,6 +433,19 @@ void handleSet() {
   uint8_t newHoldMinutes = server.arg("holdMinutes").toInt();
   if (newHoldMinutes > 120) newHoldMinutes = 120;
   holdMinutes = newHoldMinutes;
+
+  // Cap length defensively (a legit location name is well under this); keeps
+  // the current value if the field was left blank. Only re-resolves via
+  // ezTime's lookup service if the location actually changed - setLocation()
+  // needs >3s between calls per its own docs, and there's no reason to hit
+  // the network again on every settings save if the timezone wasn't touched.
+  String newTzLocation = server.arg("tzLocation");
+  newTzLocation.trim();
+  bool tzChanged = false;
+  if (newTzLocation.length() > 0 && newTzLocation.length() <= 60 && newTzLocation != tzLocation) {
+    tzLocation = newTzLocation;
+    tzChanged = true;
+  }
 
   for (int i = 0; i < 7; i++) {
     String prefix = "d" + String(i);
@@ -388,6 +462,20 @@ void handleSet() {
   }
 
   saveAlarmSettings();
+
+  // Re-resolves immediately rather than waiting for reboot, so the new
+  // timezone is reflected in the next page load's "Current time". Only
+  // possible with WiFi up, since (unlike the old POSIX-string approach) this
+  // needs a network lookup; if offline, the saved location is picked up on
+  // the next successful syncTime() (boot or reconnect).
+  if (tzChanged && WiFi.status() == WL_CONNECTED) {
+    if (!myTZ.setLocation(tzLocation)) {
+      Serial.print("Timezone lookup failed for \"");
+      Serial.print(tzLocation);
+      Serial.print("\": ");
+      Serial.println(errorString());
+    }
+  }
 
   server.sendHeader("Location", "/");
   server.send(303);

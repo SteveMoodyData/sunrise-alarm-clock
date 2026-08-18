@@ -102,7 +102,9 @@ Total cost: $15-30
 For ESP32 boards, `SRM_Sunrise_Scheduled.ino` replaces the smart-outlet-cuts-power trigger entirely: the board stays powered continuously, syncs time over WiFi (NTP), and manages its own alarm schedule instead. It adds:
 
 - An independent on/off/time alarm for **each day of the week** (e.g. weekdays at 6:30, weekends at 7:30, some days off)
-- A web page (reachable at `http://sunrise-light.local/` or by IP) to change the schedule, sunrise duration, and post-sunrise hold time without re-flashing
+- A web page (reachable at `http://sunrise-light.local/` or by IP) to change the schedule, sunrise duration, post-sunrise hold time, and timezone without re-flashing
+- **WiFi setup via phone, no source code needed** - joins a network through an on-device captive portal instead of hardcoded credentials
+- **Timezone** set by typing a location name, picking a preset, or auto-detecting from your phone/computer - no POSIX TZ strings to look up
 - A **Start Now** button to trigger a sunrise on demand
 - Settings that persist across reboots
 

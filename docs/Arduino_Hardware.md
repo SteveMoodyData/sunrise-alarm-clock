@@ -263,7 +263,7 @@ Samsung SmartThings Hub
 
 The WiFi-scheduled variant (`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`) needs to stay powered **continuously** so it can hold its WiFi connection and NTP-synced clock and watch for its own alarm time. Plug it into a wall adapter or always-on USB power — **not** the smart outlet described above, since that outlet's whole job (cutting power on a schedule) is what this variant replaces. The smart-outlet-scheduling setup above still applies to the other sketches (`SRM_Sunrise_Smooth.ino`, `SRM_Sunrise_NonBlocking.ino`, `SRM_Sunrise_ESP32.ino`).
 
-It also needs a **2.4GHz WiFi network with internet access** (for NTP time sync) - ESP32 hardware can't join 5GHz-only networks. Full setup steps (WiFi credentials, timezone, finding the web UI) are in `arduino/standalone/README.md`.
+It also needs a **2.4GHz WiFi network with internet access** (for NTP time sync) - ESP32 hardware can't join 5GHz-only networks. WiFi is joined via an on-device captive portal (no credentials in source code) and timezone via the web UI - full setup steps are in `arduino/standalone/README.md`.
 
 ---
 

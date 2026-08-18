@@ -11,7 +11,7 @@ Decisions made building v1:
 
 ## Status
 
-**v1, v2, and v3 are all implemented and pushed.** This whole document is a build record, not a to-do list. v3 (AP-mode + captive portal WiFi provisioning) has not yet been verified on real hardware — see the "Verification (real hardware) — additions" checklist under the v3 section, items 14-17.
+**v1 through v5 are all implemented and pushed.** This whole document is a build record, not a to-do list. v3 (AP-mode + captive portal WiFi provisioning) has not yet been verified on real hardware — see the "Verification (real hardware) — additions" checklist under the v3 section, items 14-17. v4 shipped a web-editable timezone using a client-side JS heuristic to guess a POSIX TZ string; it was superseded almost immediately by v5, which replaced that heuristic with the ezTime library for an authoritative (not guessed) resolution. v4's section below is kept as a build record of what was tried and why it was replaced, not as current behavior — see v5 for what's actually running.
 
 **v2 shipped these four additions** on top of the working v1 code, requested after v1 was confirmed working and reviewed/resolved against the user in `_spec/wifi-scheduled-sunrise.md`:
 1. mDNS hostname (`sunrise-light.local`)
@@ -191,6 +191,202 @@ Registered in `setup()`: `server.on("/reset-wifi", HTTP_POST, handleResetWifi);`
 - **`arduino/standalone/SRM_Sunrise_Scheduled/wifi_secrets.h.example`** — deleted (and the real `wifi_secrets.h`, which was already gitignored)
 - **`arduino/standalone/README.md`** — WiFi setup section rewritten to describe the captive-portal flow instead of the "copy `wifi_secrets.h.example`" step
 - **`_spec/wifi-scheduled-sunrise.md`** — v3 section moved out of "proposed" framing into the main implemented-behavior description
+
+## v4: Web-editable, browser-auto-detected timezone (superseded by v5 - kept as build record)
+
+**Driver:** the POSIX TZ string was still a compile-time `#define`, requiring source access and a reflash to change — the same problem v3 just solved for WiFi credentials. Requested directly: "I want to be able to set the timezone in the HTTP setup environment, and if possible set it automatically based on the device setting it up."
+
+**Approach chosen over alternatives considered:**
+- The ESP32 has no IANA timezone database, and embedding one (even client-side) would be a large asset for a memory-constrained device serving the page - ruled out.
+- Instead, detection happens entirely in the browser: JavaScript embedded in the served HTML reads the visiting device's own `Date` behavior (which the browser/OS already knows correctly, DST rules included) and derives a POSIX TZ string from it. The ESP32 never needs to understand IANA names at all - it only ever stores/uses the POSIX string, exactly as it always has.
+- The detect button fills the field but does not auto-submit - consistent with every other form field on this page, and lets an obviously-wrong guess be corrected by hand before saving.
+
+### `#define` change
+
+`TZ_STRING` renamed to `DEFAULT_TZ_STRING` - same first-boot-fallback-only pattern as `DEFAULT_SUNRISE_MINUTES`/`DEFAULT_HOLD_MINUTES`.
+
+### New global
+
+`String tzString = DEFAULT_TZ_STRING;` - runtime value, NVS-persisted (key `"tzString"`, namespace `"sunrise"`) via the existing `loadAlarmSettings()`/`saveAlarmSettings()` pair.
+
+### `setup()` reordering
+
+`loadAlarmSettings()` now runs *before* `syncTime()` (previously after) since `syncTime()`'s `configTzTime()` call needs `tzString` already loaded from NVS, not still at its compile-time default.
+
+### `handleSet()` — timezone handling
+
+Reads `tzString` from the form, trims it, and only accepts it if non-empty and ≤60 characters (defensive cap against a malformed/huge submission; a real POSIX TZ string is well under this) - otherwise silently keeps the previous value. After `saveAlarmSettings()`, calls `configTzTime(tzString.c_str(), NTP_SERVER)` again immediately, so the new zone is reflected in `getLocalTime()`/`strftime()` right away rather than requiring a reboot. This is safe to call without WiFi - it just resets the C library's TZ environment variable (`tzset()` under the hood); no network round-trip needed unlike the very first sync in `syncTime()`.
+
+### `handleRoot()` — Timezone field + detect button
+
+Added to the Timing section: a text input (`id`/`name='tzString'`, pre-filled with the current value) and a `type='button'` (not `submit`) **"Detect from this device"** button, plus a short explanation. A `<script>` block embedded at the end of the page body defines the detection logic:
+
+```js
+function pad(n) { return n < 10 ? '0' + n : '' + n; }
+function fmtOffset(min) {
+  var sign = min < 0 ? '-' : '';
+  var abs = Math.abs(min);
+  var h = Math.floor(abs / 60);
+  var m = abs % 60;
+  return sign + h + (m ? ':' + pad(m) : '');
+}
+function posixRule(date) {
+  var month = date.getMonth() + 1;
+  var day = date.getDate();
+  var weekday = date.getDay();
+  var daysInMonth = new Date(date.getFullYear(), month, 0).getDate();
+  var n = (day + 7 > daysInMonth) ? 5 : Math.ceil(day / 7);
+  return 'M' + month + '.' + n + '.' + weekday;
+}
+function detectTimezone() {
+  var year = new Date().getFullYear();
+  var offsets = [];
+  for (var m = 0; m < 12; m++) offsets.push(new Date(year, m, 1).getTimezoneOffset());
+  var stdOffset = Math.max.apply(null, offsets); // larger = more "west" = standard/winter time
+  var dstOffset = Math.min.apply(null, offsets);
+  var tz;
+  if (stdOffset === dstOffset) {
+    tz = 'STD' + fmtOffset(stdOffset);
+  } else {
+    // Scan day-by-day for the two transition instants. Doesn't assume
+    // calendar order, so it's correct for both hemispheres (e.g. New
+    // Zealand's DST-start-in-September comes before DST-end-in-April).
+    var prev = new Date(year, 0, 1).getTimezoneOffset();
+    var dstStart = null, dstEnd = null;
+    var d = new Date(year, 0, 1);
+    while (d.getFullYear() === year) {
+      var cur = d.getTimezoneOffset();
+      if (cur !== prev) {
+        if (cur < prev) dstStart = new Date(d); // clocks sprang forward -> DST began
+        else dstEnd = new Date(d);               // clocks fell back -> DST ended
+        prev = cur;
+      }
+      d.setDate(d.getDate() + 1);
+    }
+    tz = (dstStart && dstEnd)
+      ? ('STD' + fmtOffset(stdOffset) + 'DST,' + posixRule(dstStart) + ',' + posixRule(dstEnd))
+      : ('STD' + fmtOffset(stdOffset));
+  }
+  document.getElementById('tzString').value = tz;
+}
+```
+
+(Shipped as minified single-line `html +=` statements to match this file's existing string-building style, not formatted like the above - shown formatted here for readability.)
+
+### Known limitations of the detection heuristic
+
+- Assumes the POSIX default DST transition time (02:00 local) and a 1-hour DST shift. Wrong for the small number of zones that differ (e.g. Lord Howe Island's 30-minute DST, or zones whose transition happens at a different local hour) - the field stays hand-editable for those, same as it always was.
+- Uses placeholder `STD`/`DST` three-letter abbreviations rather than the zone's real abbreviation (e.g. `PST`/`PDT`) - these only affect the cosmetic `%Z` output in `strftime()`, not the actual offset/DST math, so this is harmless.
+- No IANA name is ever seen or stored anywhere - by design, per the "no timezone database on the ESP32" decision above.
+
+### Files touched (v4, superseded - see v5 below for what's current)
+
+- **`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`** — `TZ_STRING` → `DEFAULT_TZ_STRING`, new `tzString` global, `setup()` reordered, `loadAlarmSettings()`/`saveAlarmSettings()`/`handleSet()`/`handleRoot()` updated
+- **`_spec/wifi-scheduled-sunrise.md`** — new "Timezone: web-editable, browser-auto-detectable" section, Configuration table, NVS table, and web-interface section all updated
+
+## v5: Timezone via ezTime library (implemented, pushed; hardware verification pending)
+
+**Driver:** asked directly, right after v4 shipped: "could using the ezTime library help with not having to manually enter a timezone? ... maybe having a dropdown list of zones to set to?" (https://github.com/ropg/ezTime). Discussed trade-offs before implementing (new dependency + new third-party lookup service + a real refactor of this sketch's time-handling code, versus authoritative DST correctness for every zone instead of a client-side heuristic) - user chose to switch.
+
+**What changed vs. v4:** v4's client-side JS guessed a POSIX TZ string from the browser's own DST behavior (documented above) - correct for most zones but not all (e.g. the 30-minute-DST Lord Howe Island case), and stored a raw POSIX string the ESP32 had to already understand. v5 instead stores a plain tz-database *location name* (e.g. `"America/Los_Angeles"`) and lets the **ezTime** library resolve it authoritatively, via a lookup service the library author runs (`timezoned.rop.nl`) - the same kind of data a real `/etc/zoneinfo` would give you, not a guess. This also happened to simplify the client-side detection: instead of ~30 lines of JS scanning for DST transitions, "detect" is now a single call to the standard `Intl.DateTimeFormat().resolvedOptions().timeZone`, which returns the browser's own correct IANA zone name directly.
+
+**Confirmed library API before writing any code** (fetched `ropg/ezTime`'s README and header from GitHub rather than guessing, since a wrong function signature only surfaces as a compile error on real hardware):
+- `Timezone::setLocation(String location)` — resolves a location name via the lookup service; returns `false` on failure (unknown location, no network, server error) — check via `errorString()`.
+- `Timezone::setPosix(String posix)` — exists for offline/raw use, not used here since location-name resolution is the whole point.
+- `Timezone::setCache(String nvs_name, String key)` (ESP32 overload) — NVS-backed fallback cache; if a later `setLocation()` lookup fails, ezTime falls back to the last successful resolution instead of losing the correct time.
+- `waitForSync(uint16_t timeout)` (seconds, not ms) / `events()` (must be called every `loop()` iteration - new addition) / `timeStatus()` returning `timeNotSet`/`timeNeedsSync`/`timeSet`.
+- `Timezone::dateTime(String format)` — PHP-`date()`-style format codes.
+- `Timezone::dayOfYear()` — direct replacement for the old `tm_yday`-based `lastFiredYday` guard (exact 0-vs-1-indexing doesn't matter, since it's only ever compared for equality/inequality against its own previous value).
+- `Timezone::hour()`/`minute()` — direct replacements for `tm_hour`/`tm_min`.
+
+### `#include` changes
+
+`<time.h>` removed; `<ezTime.h>` added. `WiFi.h` still needed directly (ezTime uses it internally but doesn't hide it).
+
+### Cache: not used, after two build-error rounds
+
+The plan originally called `myTZ.setCache("eztime", "tzc")` in `syncTime()` for offline resilience (fall back to the last resolution if a lookup ever fails). This went through two real build failures before landing on "don't use it":
+1. **Compile error**: `no matching function for call to 'Timezone::setCache(const char [7], const char [4])'`. The installed ezTime build defaults its cache to EEPROM (`Timezone::setCache(int16_t)`); the NVS-based two-string overload only exists in the header when `EZTIME_CACHE_NVS` is defined before `#include <ezTime.h>`. Fixed by adding that `#define` in the sketch, confirmed against the installed library's actual `ezTime.h` (not just the GitHub README, which didn't reflect this installed version's default cache choice).
+2. **Link error**: `undefined reference to 'Timezone::setCache(String, String)'`. The declaration now resolved (fixed #1), but the *implementation* lives in the library's own `ezTime.cpp`, compiled as a separate translation unit that includes `ezTime.h` independently - it never sees the sketch's `#define`, so it was still only ever compiled with the EEPROM cache path. This library only exposes the NVS/EEPROM choice by editing the installed library file directly (per its own header comment: "Cache mechanism, either EEPROM or NVS, not both. (See README)") - not something this repo's setup instructions can portably ask every future builder to do by hand.
+- **Resolution**: dropped `setCache()` entirely rather than chase a working cache backend. `syncTime()` just calls `setLocation()`/`waitForSync()` with no cache configured - a lookup failure means no time is available until the next successful sync, the same fails-safe behavior every other network-dependent step in this sketch already has. Losing the offline-resilience nice-to-have was judged not worth either an EEPROM dependency (extra setup, a second storage mechanism alongside this sketch's own NVS `Preferences` use) or a non-reproducible local library edit.
+
+### `#define` changes
+
+`DEFAULT_TZ_STRING` (POSIX string) → `DEFAULT_TZ_LOCATION` (`"America/Los_Angeles"`, a tz-database location name). `NTP_SYNC_TIMEOUT_MS` (15000) → `NTP_SYNC_TIMEOUT_S` (15) since `waitForSync()`'s timeout parameter is in seconds. `NTP_SERVER` removed entirely - unused now that ezTime manages its own default NTP source.
+
+### Globals
+
+`Timezone myTZ;` (new) replaces all direct `time.h` calls. `String tzLocation = DEFAULT_TZ_LOCATION;` replaces `tzString`, same NVS-persisted pattern (new key `"tzLocation"` - `"tzString"` becomes an orphaned NVS key, no migration, consistent with this sketch's existing precedent for superseded keys). `lastFiredYday` widened from `int16_t` to `int32_t` to match `dayOfYear()`'s `uint16_t` return type cleanly.
+
+### `syncTime()` — rewritten
+
+```cpp
+void syncTime() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  myTZ.setCache("eztime", "tzc"); // separate NVS namespace from this sketch's own "sunrise" prefs
+  if (!myTZ.setLocation(tzLocation)) {
+    Serial.print("Timezone lookup failed for \"");
+    Serial.print(tzLocation);
+    Serial.print("\": ");
+    Serial.println(errorString());
+  }
+
+  if (waitForSync(NTP_SYNC_TIMEOUT_S)) {
+    Serial.print("Time synced: ");
+    Serial.println(myTZ.dateTime("Y-m-d H:i:s T"));
+  } else {
+    Serial.println("NTP sync timed out - scheduler will wait until time is available.");
+  }
+}
+```
+
+`loop()` gained `events();` as its first line - required by ezTime for background NTP housekeeping, easy to miss since nothing fails loudly if it's omitted (time just silently never re-syncs).
+
+### `updateScheduler()`/`beginSunrise()` — rewritten
+
+`WAITING` case: `if (timeStatus() != timeSet) break;` replaces the old `getLocalTime()` guard; `wday`/`timeMatches`/`notAlreadyFiredToday` now read from `myTZ.dateTime("w").toInt()`/`myTZ.hour()`/`myTZ.minute()`/`myTZ.dayOfYear()` instead of a `struct tm`. `beginSunrise()`: `if (timeStatus() == timeSet) lastFiredYday = myTZ.dayOfYear();` replaces the old `getLocalTime()`-gated assignment. `RUNNING`/`HOLD` are untouched - they never depended on wall-clock time.
+
+### Real bug found on hardware: weekday off-by-one
+
+Reported directly after the first successful compile: setting an alarm a few minutes out and waiting past it left the board stuck at "Waiting (0%)" - it never fired. Root cause, found by reading the installed `ezTime.cpp` (not the GitHub docs, which had already proven unreliable for this installed version once, over `setCache`):
+
+- `dateTime("w")`'s own in-source comment claims `0 = Sunday`, and the earlier v5 write-up (above) trusted that.
+- But `ezTime.cpp`'s `breakTime()` sets `tm.Wday = ((time + 4) % 7) + 1;  // Sunday is day 1` - i.e. **1=Sunday...7=Saturday** - and the `case 'w':` format handler just outputs `tm.Wday` raw, with no adjustment back to the 0-indexed value its own comment promises. `weekday()` returns the exact same unconverted value. Both are wrong relative to their documented contract in this installed version.
+- Effect: `int wday = myTZ.dateTime("w").toInt();` was always one day ahead of `dayHour[]`/`dayMinute[]`/`dayEnabled[]`'s actual 0=Sunday indexing - every day's alarm was being checked against the *next* day's slot (which was usually disabled/different, hence never matching), and on Saturday (`wday` = 7) it indexed one past the end of each 7-element array entirely.
+- **Fix**: `int wday = myTZ.dateTime("w").toInt() - 1;` - one-line change in `updateScheduler()`.
+
+### `handleRoot()` — timezone field, preset dropdown, simplified detect
+
+- Current-time display: `haveTime ? myTZ.dateTime("Y-m-d H:i:s T") : "not synced yet"` replaces the old `strftime()` call.
+- New small hardcoded `TzPreset { name, label }` array (~14 common zones: US/Canada regions, UK, Central Europe, Australia Eastern, Japan, India, UTC) renders as a `<select>` next to the text field - purely a convenience shortcut, selecting an option just fills the text input via inline `onchange`; it does not add server-side handling of its own.
+- Detect button's JS shrank to one line: `document.getElementById('tzLocation').value = Intl.DateTimeFormat().resolvedOptions().timeZone;` - replaces v4's ~20-line DST-scanning heuristic entirely.
+
+### `handleSet()` — change-gated re-resolution
+
+Only calls `myTZ.setLocation()` again if the submitted `tzLocation` actually differs from the current value (`tzChanged` flag) **and** WiFi is connected. Two reasons this differs from v4's unconditional `configTzTime()` call: (1) `setLocation()` is a real network round-trip (unlike v4's local-only `tzset()`), so gating on WiFi is necessary, not just tidy; (2) ezTime's own docs ask for ≥3 seconds between `setLocation()` calls, and re-triggering a lookup on every unrelated settings save (e.g. just editing a day's alarm time) would risk hitting that rate limit for no reason.
+
+### Known limitations / caveats
+
+- Second external dependency in this repo (after WiFiManager) - both are explicit, deliberate exceptions to the normal FastLED-only convention, justified the same way: no reasonable way to build the feature (captive portal / authoritative TZ resolution) from the ESP32 core alone.
+- Depends on a third-party lookup service (`timezoned.rop.nl`) beyond NTP itself, with no cache fallback (see above) - if that service or WiFi is unreachable during `syncTime()`, the board gets no time that boot, same as an NTP failure always meant in v1-v4.
+- `setLocation()` calls need to stay >3s apart per the library's own docs - `handleSet()`'s change-gating (above) is what keeps normal usage safely under that.
+
+### Files touched
+
+- **`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`** — `<time.h>` → `<ezTime.h>`, `DEFAULT_TZ_STRING`/`tzString` → `DEFAULT_TZ_LOCATION`/`tzLocation`, new `Timezone myTZ` global, `events()` added to `loop()`, `syncTime()`/`beginSunrise()`/`updateScheduler()`/`handleRoot()`/`handleSet()` all updated
+- **`arduino/standalone/README.md`** — WiFi-Scheduled Sunrise section: added ezTime to the libraries-to-install step, updated the "What it adds" bullet and the timezone step in Setup steps
+- **`_spec/wifi-scheduled-sunrise.md`** — "Timezone" section rewritten for the ezTime approach, Requirements/Configuration/NVS/web-interface sections updated, state-machine section's weekday/hour/minute/dayOfYear references updated
+
+### Verification (real hardware) — additions, not yet run
+
+23. Load `/`, click "Detect from this device"; confirm the Timezone field fills with your actual IANA zone name (e.g. `"America/Los_Angeles"`), not a POSIX string.
+24. Save with a freshly-detected location; confirm `/`'s "Current time" updates to the correct local time (check the `%T`-equivalent abbreviation looks right too, e.g. `PST`/`PDT`).
+25. Pick a different zone from the preset dropdown and save; confirm the displayed time shifts accordingly.
+26. Submit the settings form with the Timezone field unchanged; confirm no "Timezone lookup failed" line appears in Serial Monitor (proves the change-gating in `handleSet()` is working, not re-resolving on every save).
+27. Power-cycle after saving a timezone; reload `/` and confirm the timezone (and correct local time after resync) survived reboot.
+28. Disconnect WiFi (or block internet access) and power-cycle; confirm the board boots cleanly with "not synced yet" showing (no cache to fall back to - expected, not a bug) rather than crashing or hanging.
+29. Type a deliberately invalid location name (e.g. `"Not/A_Zone"`) and save; confirm Serial Monitor logs a "Timezone lookup failed" line with a real error string, and the board doesn't crash or hang.
 
 ## Verification (real hardware, as run against v1+v2)
 

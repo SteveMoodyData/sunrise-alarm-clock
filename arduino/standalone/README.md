@@ -159,6 +159,7 @@ This sketch is a different setup path from the sketches above - it needs an ESP3
 - **Independent alarm per day of the week** - e.g. Mon/Wed/Fri at 6:30, Sat/Sun at 7:30, other days off
 - **Web page** at `http://sunrise-light.local/` (or the board's IP address) to view status and change settings without re-flashing
 - **Editable sunrise duration** and **hold time** (how long the light stays on before auto-off after the ramp finishes)
+- **Editable timezone**, set by typing a location name (e.g. "America/Los_Angeles"), picking one from a preset dropdown, or clicking "Detect from this device" - no POSIX TZ strings or DST rules to figure out, ezTime resolves it correctly
 - **Start Now button** to trigger a sunrise on demand, separate from the schedule
 - **WiFi setup via phone, no source code needed** - first boot (or after a "Reset WiFi") opens a WiFi setup hotspot instead of requiring hardcoded credentials, so the board can be built and handed to someone else to join their own network
 - **Settings persist** across power loss/reboot (stored in the ESP32's flash, not just RAM)
@@ -167,17 +168,17 @@ This sketch is a different setup path from the sketches above - it needs an ESP3
 
 1. **Board:** Tools → Board → **ESP32 Dev Module** (not Arduino Nano). See the ESP32 board-package install steps in Step 1 above if you haven't added ESP32 support to the Arduino IDE yet.
 
-2. **WiFiManager library:** Sketch → Include Library → Manage Libraries, search "WiFiManager", install the one by **tzapu**. This is the one extra dependency beyond FastLED in this whole repo - it's what provides the phone-friendly WiFi setup flow below.
+2. **Libraries:** Sketch → Include Library → Manage Libraries, and install two extra libraries beyond FastLED (the only ones in this whole repo):
+   - **WiFiManager** by **tzapu** - provides the phone-friendly WiFi setup flow below.
+   - **ezTime** by **Rop Gonggrijp** - resolves the timezone location name you pick below (e.g. "America/Los_Angeles") to the correct offset and DST rule automatically, so nobody has to hand-write a POSIX TZ string.
 
-3. **Timezone:** in the sketch itself, set `TZ_STRING` to a POSIX TZ string for your location (examples for US Eastern/Pacific are in a comment right above it).
+3. **Upload**, then open the Serial Monitor at **115200 baud** to watch WiFi/NTP status.
 
-4. **Upload**, then open the Serial Monitor at **115200 baud** to watch WiFi/NTP status.
+4. **Wiring and power:** same LED wiring as the other sketches (`DATA_PIN` 18), but this variant needs to stay **continuously powered** - plug it into a wall adapter or always-on USB power, not the smart outlet. See [Hardware guide](../../docs/Arduino_Hardware.md) for details.
 
-5. **Wiring and power:** same LED wiring as the other sketches (`DATA_PIN` 18), but this variant needs to stay **continuously powered** - plug it into a wall adapter or always-on USB power, not the smart outlet. See [Hardware guide](../../docs/Arduino_Hardware.md) for details.
+5. **Connect it to WiFi:** on first boot (no saved network yet), the board broadcasts a WiFi network named **`sunrise-light-setup`**. From a phone or computer, join that network like any other WiFi network - a setup page should pop up automatically (or open a browser to `192.168.4.1`). Pick your real network from the list, enter its password, and submit. The board reboots and joins that network. ESP32 only supports **2.4GHz** WiFi - if your router broadcasts separate 2.4GHz/5GHz networks, pick the 2.4GHz one. If nobody finishes setup within 3 minutes, the board gives up and boots offline (LEDs stay off, no schedule fires) - power-cycle it to make the setup hotspot try again.
 
-6. **Connect it to WiFi:** on first boot (no saved network yet), the board broadcasts a WiFi network named **`sunrise-light-setup`**. From a phone or computer, join that network like any other WiFi network - a setup page should pop up automatically (or open a browser to `192.168.4.1`). Pick your real network from the list, enter its password, and submit. The board reboots and joins that network. ESP32 only supports **2.4GHz** WiFi - if your router broadcasts separate 2.4GHz/5GHz networks, pick the 2.4GHz one. If nobody finishes setup within 3 minutes, the board gives up and boots offline (LEDs stay off, no schedule fires) - power-cycle it to make the setup hotspot try again.
-
-7. **Access the web page:** from a phone or computer on the same WiFi network, go to `http://sunrise-light.local/` (works on macOS/iOS/Android out of the box; Windows may need Bonjour installed) or the IP address printed in Serial Monitor. From there you can set each day's alarm time, the sunrise duration, the hold time, hit **Start Now** to test the LED sequence immediately, or hit **Reset WiFi** to forget the current network and reopen the `sunrise-light-setup` hotspot (e.g. to move the device to a new house/network).
+6. **Access the web page:** from a phone or computer on the same WiFi network, go to `http://sunrise-light.local/` (works on macOS/iOS/Android out of the box; Windows may need Bonjour installed) or the IP address printed in Serial Monitor. From there you can set each day's alarm time, the sunrise duration, and the hold time. For **timezone**, click **Detect from this device** to fill it in from your phone/computer's own clock, pick one from the dropdown of common zones, or type any [tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) location name by hand - then hit **Save**; the board looks up the correct offset and DST rule automatically (needs WiFi). Hit **Start Now** to test the LED sequence immediately, or **Reset WiFi** to forget the current network and reopen the `sunrise-light-setup` hotspot (e.g. to move the device to a new house/network).
 
 ---
 
