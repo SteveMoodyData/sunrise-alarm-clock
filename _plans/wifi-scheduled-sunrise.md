@@ -11,7 +11,7 @@ Decisions made building v1:
 
 ## Status
 
-**v1 through v5 are all implemented and pushed.** This whole document is a build record, not a to-do list. v3 (AP-mode + captive portal WiFi provisioning) has not yet been verified on real hardware — see the "Verification (real hardware) — additions" checklist under the v3 section, items 14-17. v4 shipped a web-editable timezone using a client-side JS heuristic to guess a POSIX TZ string; it was superseded almost immediately by v5, which replaced that heuristic with the ezTime library for an authoritative (not guessed) resolution. v4's section below is kept as a build record of what was tried and why it was replaced, not as current behavior — see v5 for what's actually running.
+**v1 through v7 are all implemented.** This whole document is a build record, not a to-do list. **v1-v5 are pushed; v6 and v7 are implemented locally but not yet pushed.** v3 (AP-mode + captive portal WiFi provisioning) has not yet been verified on real hardware — see the "Verification (real hardware) — additions" checklist under the v3 section, items 14-17. v4 shipped a web-editable timezone using a client-side JS heuristic to guess a POSIX TZ string; it was superseded almost immediately by v5, which replaced that heuristic with the ezTime library for an authoritative (not guessed) resolution. v4's section below is kept as a build record of what was tried and why it was replaced, not as current behavior — see v5 for what's actually running. v6 (OTA firmware updates via the web UI) was verified once indirectly through WiFiManager's own built-in `/update` page, then reimplemented against this sketch's own always-on server - that reimplementation hasn't been hardware-tested yet. v7 is a visual/UX redesign of the settings page on top of v6 - it has compiled and rendered on real hardware (confirmed via a phone screenshot), and went through a round of layout refinement based on that screenshot (see "Refinements after first hardware render" in the v7 section) - not yet re-tested after those refinements, and OTA (v6) itself still untested.
 
 **v2 shipped these four additions** on top of the working v1 code, requested after v1 was confirmed working and reviewed/resolved against the user in `_spec/wifi-scheduled-sunrise.md`:
 1. mDNS hostname (`sunrise-light.local`)
@@ -387,6 +387,103 @@ Only calls `myTZ.setLocation()` again if the submitted `tzLocation` actually dif
 27. Power-cycle after saving a timezone; reload `/` and confirm the timezone (and correct local time after resync) survived reboot.
 28. Disconnect WiFi (or block internet access) and power-cycle; confirm the board boots cleanly with "not synced yet" showing (no cache to fall back to - expected, not a bug) rather than crashing or hanging.
 29. Type a deliberately invalid location name (e.g. `"Not/A_Zone"`) and save; confirm Serial Monitor logs a "Timezone lookup failed" line with a real error string, and the board doesn't crash or hang.
+
+## v6: OTA firmware updates via the web UI (implemented, pushed; hardware verification pending)
+
+**Driver:** asked directly - "the WifiManager has an option to update firmware. Does this work with arduino apps? Does it just use the ino file or does it need to be packaged differently?" Explained: WiFiManager's built-in `/update` page (`handleUpdate()`/`handleUpdating()` in the installed library's `WiFiManager.cpp`, confirmed by reading the source) uses the ESP32 core's `Update` library to flash a pre-compiled `.bin` (Arduino IDE's **Sketch → Export Compiled Binary** - there's no on-device compiler, so the raw `.ino` never gets uploaded anywhere). User exported the binary and **verified this works** using WiFiManager's existing page - but that page only exists while `connectWiFi()`'s function-local `WiFiManager wm` object is alive, i.e. only during the transient captive-portal window (first boot / right after "Reset WiFi"), not during normal operation. Asked to make it reachable from the sketch's own always-on server instead.
+
+### Why not just keep using WiFiManager's page
+
+Two ways to make WiFiManager's own `/update` reachable outside the transient portal window were considered and rejected in the earlier discussion:
+- `wm.startWebPortal()` to keep WiFiManager's internal server alive in STA mode - but that server also wants port 80, conflicting with this sketch's own `WebServer server(WEB_SERVER_PORT)` already bound there.
+- Triggering "Reset WiFi" every time just to get a firmware-update window - technically works (that's how it was verified) but wipes WiFi credentials every time, not a usable repeatable workflow.
+
+Simplest fix: reimplement the same upload-to-`Update`-library pattern directly on this sketch's own server, which is already always running.
+
+### `#include` addition
+
+`#include <Update.h>` - ships with the ESP32 Arduino core (no library install), same as `WebServer.h`/`Preferences.h`/`ESPmDNS.h` above it.
+
+### New routes
+
+- **`GET /update`** (`handleUpdatePage()`) - plain HTML form, `<input type='file' name='update'>` posting multipart data to `/update`, plus a link back to `/`.
+- **`POST /update`** - registered as `server.on("/update", HTTP_POST, handleFirmwareUpdate, handleFirmwareUpload);`, using `WebServer::on()`'s 4-argument overload (`RequestHandler &on(const Uri &uri, HTTPMethod method, THandlerFunction fn, THandlerFunction ufn)` - confirmed against the installed ESP32 core's `WebServer.h`, comment there literally says "ufn handles file uploads"):
+  - `handleFirmwareUpload()` is the `ufn` - called repeatedly as upload chunks arrive (`server.upload()`, `HTTPUpload::status` cycling through `UPLOAD_FILE_START` → `UPLOAD_FILE_WRITE` (repeated) → `UPLOAD_FILE_END`), streaming each chunk into `Update.write()` rather than buffering the whole file in RAM. Mirrors WiFiManager's own `handleUpdating()` almost line-for-line - same library, same pattern, just wired into a different server instance.
+  - `handleFirmwareUpdate()` is the `fn` - runs once after the body is fully received, checks `Update.hasError()`, sends a plain-text success/failure response, then `ESP.restart()`s either way after a 1s delay (a failed partial flash shouldn't be left half-applied).
+- A **Firmware Update** link (`<a href='/update'>`) added to `handleRoot()`'s button row, next to Start Now / Reset WiFi.
+
+### API verified against the installed ESP32 core before writing code
+
+Given the ezTime `setCache` surprise earlier in this project, checked the actually-installed library sources rather than trusting memory:
+- `WebServer.h` (`.../packages/esp32/hardware/esp32/3.3.11/libraries/WebServer/src/WebServer.h`): confirmed the 4-arg `on()` overload exists and its parameter order (handler, then upload-handler).
+- `Update.h` (`.../packages/esp32/hardware/esp32/3.3.11/libraries/Update/src/Update.h`): confirmed `UPDATE_SIZE_UNKNOWN`, `begin(size)`, `write(data, len)`, `end(evenIfRemaining)`, `printError(Print&)`, `hasError()` all exist with the signatures used.
+
+### Known limitations / caveats
+
+- **No authentication** on `/update` - same as every other route in this sketch (`/start`, `/set`, `/reset-wifi` are equally open). Anyone on the local network can push firmware. Consistent with this sketch's existing security posture, not a new gap introduced here, but worth having in the record given the "gift to a non-technical user on their own network" scenario v3 was designed around.
+- Requires an OTA-capable partition scheme (two app slots) - the default "Default" partition scheme for ESP32 Dev Module already provides this; no sketch-level change needed, but a from-scratch board with a custom minimal partition table could lack it.
+- `Update.begin(UPDATE_SIZE_UNKNOWN)` doesn't know the final size up front (the upload's `Content-Length` isn't threaded through to it here) - matches WiFiManager's own approach, and works fine, just can't pre-validate the image will fit before starting to write.
+
+### Files touched
+
+- **`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`** — `#include <Update.h>` added, `GET /update`/`POST /update` routes registered in `setup()`, three new functions (`handleUpdatePage()`, `handleFirmwareUpload()`, `handleFirmwareUpdate()`), Firmware Update link added to `handleRoot()`. Also fixed a stale comment on the `Timezone myTZ` global left over from the v5 cache-removal fix (claimed a cache was kept when it isn't).
+- **`_spec/wifi-scheduled-sunrise.md`** — new "Firmware updates via the web UI" section, `GET /update`/`POST /update` added to the Web interface section, verification pointer updated
+
+### Verification (real hardware) — additions, not yet run
+
+30. From `/`, click **Firmware Update**; confirm the upload form page loads.
+31. Export a compiled `.bin` (Sketch → Export Compiled Binary) and upload it via that form while the board is on its normal network (not the captive portal); confirm it flashes and reboots successfully, and that WiFi/schedule settings survived (they live in NVS, untouched by an app-partition flash).
+32. Confirm Serial Monitor shows the "Firmware update starting"/"complete" log lines and no `Update.printError()` output during a successful update.
+33. Try uploading something that isn't a valid firmware image (e.g. a random file) and confirm the board reports failure and reboots cleanly rather than bricking.
+
+## v7: Settings page visual redesign (implemented, compiled, rendered on hardware; refined after screenshot feedback, re-test pending)
+
+**Driver:** a phone screenshot of the plain-HTML v6 page ("the look and feel on a phone aren't great") plus a direct ask: break functions into sections, move admin actions (Start Now/Reset WiFi/Firmware Update) to the bottom, make it look like a modern settings app rather than "a cheap web page", rename "Start Now". Brainstormed three visual directions first (iOS-style grouped list / warm dark sunrise dashboard / minimal whitespace) with ASCII-mockup previews before writing any code - user picked:
+1. **iOS-style grouped list** as the visual direction.
+2. **"Test Run Sunrise"** as the new button label (from a few options offered).
+3. **Native `<input type="time">`** per day instead of separate hour/minute number boxes.
+
+### Visual design (all inline, no external CSS/fonts/CDN - the page must render standalone from the ESP32)
+
+- Light gray page background (`#f2f2f7`), white rounded `.card` sections (10px radius, subtle shadow), uppercase gray `.section-label`s above each card, `-apple-system`/`Segoe UI`/Roboto system font stack.
+- Single warm accent color (`#ff9500`, an amber/orange) used for the Save button, active toggle state, and the "Running" state pill - a deliberate nod to the product itself (a sunrise clock) rather than a neutral iOS blue.
+- Hero card at the top: current date/time, a colored state pill (`waiting`=gray `#8e8e93`, `running`=amber `#ff9500` with live percentage appended, `hold`=green `#34c759`), WiFi IP/mDNS address, and `FIRMWARE_VERSION` (new `#define`, bumped manually to confirm an OTA update took effect).
+- Pure-CSS toggle switches for each day's enabled state (`.toggle` / `.track` / `::before` with a `:checked + .track` sibling-selector transform) - purely visual, the underlying element is still a normal `<input type=checkbox>` so `server.hasArg()` parsing is completely unchanged.
+- `.row-btn` (`all: unset` reset, then re-styled as a full-width flex row) makes the Device section's `<form><button></button></form>` elements look like plain list rows with a trailing `›` chevron, matching the `<a href='/update'>` Firmware Update row styled the same way via `.row-link`.
+
+### Structural change: `handleSet()` now parses `<input type="time">`
+
+Each day's `dNh`/`dNm` number fields became one `dNt` field. `<input type="time">` always submits `"HH:MM"` in 24-hour zero-padded form regardless of the browser's display locale/format, so `handleSet()` now does `t.indexOf(':')` + two `substring()`/`toInt()` calls instead of reading two separate fields - falls back to the existing `dayHour[i]`/`dayMinute[i]` value if the field is missing or malformed (same defensive-parsing spirit as every other field in this handler) rather than zeroing it out. The underlying storage (`dayHour[]`/`dayMinute[]` as separate `uint8_t` arrays, NVS keys `dNh`/`dNm`) is **unchanged** - only the HTTP field format changed, not the data model.
+
+### Refinements after first hardware render
+
+The initial version above compiled and rendered correctly (confirmed via a phone screenshot showing real device data - schedule, timing, timezone, all populated), but the screenshot surfaced three follow-up requests:
+
+**1. Caption/divider placement bug.** The screenshot showed "hard to tell what the text is referring to" for the Timing fields (and, on inspection, the same problem existed in the Device section). Root cause: `.row` (and originally `.row-btn`/`.row-link`) each carried their own `border-bottom`, with only the *last* such element in a card losing it via `:last-child`. Where a field's `.explain` caption came right after its `.row` as a separate sibling, the row was never actually the last child (the explain div was), so the row kept its border - meaning the divider landed **between a field and its own caption**, not between the caption and the next field. That reads exactly backwards: the caption visually attaches to the wrong neighbor.
+
+   Fix: moved the border to a new `.item` wrapper div that contains a field's `.row` *and* its `.explain` together as one unit, with `.item:last-child` losing the border instead. Applied consistently to Schedule (each day, no caption but wrapped anyway for consistency), Timing, Timezone, and Device (each admin action + its caption, where present). Also gave `.explain` a small `margin-top:-6px` to pull it visually snug against its own field, while keeping its own bottom padding (14px) so the gap before the *next* item (caption padding + border + next item's own top padding) reads clearly larger - tight coupling to what it explains, clear separation from what it doesn't.
+
+**2. Missing captions for Device actions.** Asked directly: explain what "Test Run Sunrise" and "Reset WiFi" actually do, since neither is fully self-explanatory from the label alone (deliberately not extended to "Firmware Update", which wasn't asked for and is reasonably self-explanatory). Added `.explain` captions matching the existing tone used elsewhere on the page:
+   - Test Run Sunrise: "Runs the full sunrise sequence right now, using the current duration setting - handy for testing without waiting for the scheduled time. Doesn't change the schedule."
+   - Reset WiFi: "Forgets the saved WiFi network and restarts, broadcasting the sunrise-light-setup hotspot again so it can join a different network. Schedule and other settings aren't affected."
+
+**3. Desktop width.** Asked: "is there a way to limit the width of the page so it looks ok on a pc and a phone?" The page had no `max-width`, so on a wide desktop browser window the cards/rows would stretch edge-to-edge across the screen. Added `max-width:480px;margin:0 auto;` to `body`. On a phone (viewport already narrower than 480px) this has zero effect - unchanged from before. On a wider window, content caps at a phone-ish column and centers itself instead of stretching.
+
+### Files touched
+
+- **`arduino/standalone/SRM_Sunrise_Scheduled/SRM_Sunrise_Scheduled.ino`** — `FIRMWARE_VERSION` `#define` added; `handleRoot()` fully rewritten (inline `<style>` block, restructured markup: hero card, Schedule/Timing/Timezone cards inside the `/set` form, Device card below it); new `zeroPad2()` helper; `handleSet()`'s day-parsing loop rewritten for the `dNt` field; plus the three refinements above (`.item` wrapper restructuring, Device captions, `body` max-width).
+- **`_spec/wifi-scheduled-sunrise.md`** — `GET /`/`POST /set` sections in "Web interface" rewritten to describe the new layout and field format; "Start Now" renamed to "Test Run Sunrise" everywhere it's referenced (Purpose, WiFi-provisioning caveats, fails-safe behavior, verification pointer); Device-card description updated to mention the explanatory captions.
+
+### Verification (real hardware) — additions, not yet run
+
+34. Load `/` on a phone; confirm the page renders as grouped cards (not a plain unstyled form) and is comfortably usable without pinch-zooming.
+35. Tap a day's time field; confirm the phone's native time-picker UI appears (not a plain text/number keyboard).
+36. Toggle a day off/on via the switch, change a time, hit Save; confirm the schedule persisted correctly (this is the real test that `dNt` parsing replaced `dNh`/`dNm` parsing without breaking anything).
+37. Confirm the hero card's state pill updates correctly across all three states (gray while `Waiting`, amber with a live percentage while `Running`, green while `Holding`).
+38. Confirm **Test Run Sunrise**, **Reset WiFi**, and **Firmware Update** all still work from their new position/styling at the bottom of the page.
+39. **New**: reload `/` and confirm each field's caption now visually groups with the field above it (not the one below), and that there's a clearly larger gap before the next field/day - the real test of the `.item` wrapper fix.
+40. **New**: confirm Test Run Sunrise and Reset WiFi each show their new explanatory captions.
+41. **New**: load `/` in a desktop browser at a wide window size; confirm the page content caps at a narrow, phone-like column centered on the page rather than stretching full-width. Resize the window narrower than ~480px and confirm it behaves the same as it always did (no regression on small windows).
 
 ## Verification (real hardware, as run against v1+v2)
 

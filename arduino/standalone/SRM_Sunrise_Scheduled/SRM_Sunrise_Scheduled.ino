@@ -5,6 +5,7 @@
 #include <Preferences.h>
 #include <ESPmDNS.h>
 #include <ezTime.h>
+#include <Update.h>
 
 // ---------------------------------------------------------------------------
 // POWER SETUP CHANGE: unlike the other sketches in this repo, this variant
@@ -19,8 +20,8 @@
 
 // First-boot fallback only - once the web form has been submitted once, the
 // runtime values (sunriseMinutes / holdMinutes below) come from NVS instead.
-#define DEFAULT_SUNRISE_MINUTES 3
-#define DEFAULT_HOLD_MINUTES 6
+#define DEFAULT_SUNRISE_MINUTES 30
+#define DEFAULT_HOLD_MINUTES 60
 
 // ESP32 dev boards have no D9 (that's a Nano-only silkscreen label).
 // GPIO18 is a safe general-purpose output; see SRM_Sunrise_ESP32.ino for why.
@@ -57,6 +58,10 @@
 // --- Web server ---
 #define WEB_SERVER_PORT 80
 
+// Shown on the status page - bump this after changes worth confirming took
+// effect post-update (see the /update firmware page).
+#define FIRMWARE_VERSION "0.1.2"
+
 // Define the array of leds
 CRGB leds[NUM_LEDS];
 
@@ -92,9 +97,9 @@ uint16_t sunriseMinutes = DEFAULT_SUNRISE_MINUTES;
 uint8_t holdMinutes = DEFAULT_HOLD_MINUTES; // 0-120, clamped in handleSet()
 
 // ezTime's timezone object. Resolves a tz-database location name (below) to
-// the correct POSIX rule (DST included) via a lookup service, and keeps its
-// own NVS-backed cache (see syncTime()) so a later lookup failure falls back
-// to the last-known-good resolution instead of losing the correct time.
+// the correct POSIX rule (DST included) via a lookup service - see
+// syncTime() for why no cache is configured (a lookup failure just means no
+// time until the next successful sync, same as everything else here).
 Timezone myTZ;
 
 // Runtime-editable tz-database location name (web-configurable and
@@ -129,6 +134,8 @@ void setup() {
   server.on("/set", HTTP_POST, handleSet);
   server.on("/start", HTTP_POST, handleStartNow);
   server.on("/reset-wifi", HTTP_POST, handleResetWifi);
+  server.on("/update", HTTP_GET, handleUpdatePage);
+  server.on("/update", HTTP_POST, handleFirmwareUpdate, handleFirmwareUpload);
   server.onNotFound(handleNotFound);
   server.begin();
 }
@@ -341,6 +348,11 @@ void sunrise() {
 
 const char* dayNames[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
+// Zero-pads to 2 digits for building "HH:MM" values for <input type=time>.
+String zeroPad2(uint8_t n) {
+  return (n < 10 ? "0" : "") + String(n);
+}
+
 // A small hand-picked set of common tz-database locations for the settings
 // form's dropdown - convenience only, not exhaustive. Any location name
 // (not just ones listed here) can still be typed into the text field or
@@ -368,49 +380,123 @@ void handleRoot() {
   bool haveTime = (timeStatus() == timeSet);
 
   String stateName = currentState == WAITING ? "Waiting" : currentState == RUNNING ? "Running" : "Holding";
+  String stateClass = currentState == WAITING ? "waiting" : currentState == RUNNING ? "running" : "hold";
   uint8_t progressPct = currentState == RUNNING ? (uint32_t)currentStep * 100 / 511 : (currentState == HOLD ? 100 : 0);
+  if (currentState == RUNNING) stateName += " " + String(progressPct) + "%";
 
   String html = "<!DOCTYPE html><html><head><title>Sunrise Alarm</title>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'></head><body>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+
+  // iOS-Settings-style theme: light gray background, white grouped cards,
+  // uppercase section labels, pure-CSS toggle switches (no JS needed - the
+  // underlying <input type=checkbox> still submits normally), single warm
+  // accent color (#ff9500) nodding to the product itself. No web fonts/CDN -
+  // this page has to render standalone from the ESP32.
+  html += "<style>";
+  html += "*{box-sizing:border-box;}";
+  // max-width + auto margins: on a phone (viewport already narrower than
+  // this) it has no effect, page stays full-width same as before. On a
+  // wider window it caps the content to a phone-ish column instead of
+  // stretching rows edge-to-edge across the screen.
+  html += "body{margin:0 auto;max-width:480px;padding:16px 16px 40px;background:#f2f2f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#000;}";
+  html += "h1{font-size:26px;margin:4px 0 16px;}";
+  html += ".section-label{font-size:13px;font-weight:600;color:#6e6e73;text-transform:uppercase;letter-spacing:.5px;margin:24px 4px 8px;}";
+  html += ".card{background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.05);}";
+  html += ".row{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;gap:10px;}";
+  // Border lives on .item (a row plus its optional .explain caption below
+  // it), not on .row itself - a row's own border would land between the
+  // field and its caption instead of after it, making captions read as
+  // belonging to the next field down rather than the one above.
+  html += ".item{border-bottom:1px solid #e5e5ea;}";
+  html += ".item:last-child{border-bottom:none;}";
+  html += ".hero .time{font-size:19px;font-weight:600;}";
+  html += ".hero .sub{color:#6e6e73;font-size:13px;margin-top:4px;}";
+  html += ".pill{display:inline-block;padding:2px 10px;border-radius:999px;font-size:13px;font-weight:600;color:#fff;margin-left:6px;}";
+  html += ".pill.waiting{background:#8e8e93;}.pill.running{background:#ff9500;}.pill.hold{background:#34c759;}";
+  html += ".row label{font-size:16px;}";
+  html += ".row input[type=number],.row input[type=time]{border:none;background:none;font-size:16px;text-align:right;font-family:inherit;color:#000;}";
+  html += ".row input[type=time]{width:110px;}";
+  html += ".day-name{font-size:16px;width:40px;}";
+  html += ".toggle{position:relative;display:inline-block;width:44px;height:26px;flex-shrink:0;}";
+  html += ".toggle input{opacity:0;width:0;height:0;position:absolute;}";
+  html += ".toggle .track{position:absolute;inset:0;background:#e5e5ea;border-radius:999px;transition:background .15s;}";
+  html += ".toggle .track::before{content:'';position:absolute;width:22px;height:22px;left:2px;top:2px;background:#fff;border-radius:50%;transition:transform .15s;box-shadow:0 1px 3px rgba(0,0,0,.3);}";
+  html += ".toggle input:checked+.track{background:#ff9500;}.toggle input:checked+.track::before{transform:translateX(18px);}";
+  // Negative margin-top pulls the caption up snug against its own field;
+  // the item's border-bottom (after this padding) then reads as the gap
+  // before the *next* field - tight coupling to what it explains, clear
+  // separation from what it doesn't.
+  html += ".explain{font-size:13px;color:#6e6e73;padding:0 16px 14px;margin-top:-6px;}";
+  html += ".explain a{color:#ff9500;}";
+  html += ".tz-row{flex-direction:column;align-items:stretch;}";
+  html += ".tz-row input[type=text]{text-align:left;width:100%;padding:6px 0;}";
+  html += ".tz-actions{display:flex;gap:8px;margin-top:6px;}";
+  html += ".tz-actions button,.tz-actions select{flex:1;padding:8px;border-radius:8px;border:1px solid #d1d1d6;background:#fff;font-size:14px;font-family:inherit;}";
+  html += ".save-btn{display:block;width:100%;padding:14px;margin-top:20px;background:#ff9500;color:#fff;border:none;border-radius:10px;font-size:17px;font-weight:600;}";
+  html += ".row-btn{all:unset;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;width:100%;padding:14px 16px;font-size:17px;color:#000;background:#fff;cursor:pointer;}";
+  html += ".row-link{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;font-size:17px;color:#000;text-decoration:none;}";
+  html += ".row-btn:active,.row-link:active{background:#f2f2f7;}";
+  html += ".danger{color:#ff3b30;}";
+  html += ".chev{color:#c7c7cc;}";
+  html += "form{margin:0;}";
+  html += "</style></head><body>";
+
   html += "<h1>Sunrise Alarm</h1>";
 
-  html += "<p><b>Current time:</b> ";
-  html += haveTime ? myTZ.dateTime("Y-m-d H:i:s T") : String("not synced yet");
-  html += "</p>";
-
-  html += "<p><b>WiFi:</b> " + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("disconnected")) + "</p>";
-  html += "<p><b>Address:</b> http://" + String(MDNS_HOSTNAME) + ".local/</p>";
-  html += "<p><b>Sunrise state:</b> " + stateName + " (" + String(progressPct) + "%)</p>";
-
-  html += "<form method='POST' action='/start'><input type='submit' value='Start Now'></form>";
-  html += "<form method='POST' action='/reset-wifi' onsubmit=\"return confirm('This forgets the saved WiFi network and restarts into setup mode. Continue?');\"><input type='submit' value='Reset WiFi'></form>";
+  html += "<div class='card hero'><div class='row'><div>";
+  html += "<div class='time'>";
+  html += haveTime ? myTZ.dateTime("Y-m-d H:i:s T") : String("Time not synced yet");
+  html += "<span class='pill " + stateClass + "'>" + stateName + "</span>";
+  html += "</div>";
+  html += "<div class='sub'>" + (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("WiFi disconnected"));
+  html += " &middot; " + String(MDNS_HOSTNAME) + ".local &middot; v" + FIRMWARE_VERSION + "</div>";
+  html += "</div></div></div>";
 
   html += "<form method='POST' action='/set'>";
 
-  html += "<h2>Timing</h2>";
-  html += "<label>Sunrise duration (minutes): <input type='number' name='sunriseMinutes' min='1' value='" + String(sunriseMinutes) + "' style='width:4em'></label><br>";
-  html += "<small>How long the light takes to fade from fully dark to fully bright once the scheduled time hits.</small><br><br>";
-  html += "<label>Hold before auto-off (minutes, 0-120): <input type='number' name='holdMinutes' min='0' max='120' value='" + String(holdMinutes) + "'></label><br><br>";
+  html += "<div class='section-label'>Schedule</div><div class='card'>";
+  for (int i = 0; i < 7; i++) {
+    String prefix = "d" + String(i);
+    String timeVal = zeroPad2(dayHour[i]) + ":" + zeroPad2(dayMinute[i]);
+    html += "<div class='item'><div class='row'>";
+    html += "<span class='day-name'>" + String(dayNames[i]) + "</span>";
+    html += "<input type='time' name='" + prefix + "t' value='" + timeVal + "'>";
+    html += "<label class='toggle'><input type='checkbox' name='" + prefix + "e'" + (dayEnabled[i] ? " checked" : "") + "><span class='track'></span></label>";
+    html += "</div></div>";
+  }
+  html += "</div>";
 
-  html += "<label>Timezone: <input type='text' id='tzLocation' name='tzLocation' value='" + tzLocation + "' style='width:22em' placeholder='e.g. America/Los_Angeles'></label> ";
-  html += "<button type='button' onclick='detectTimezone()'>Detect from this device</button><br>";
-  html += "<label>Or pick a common one: <select onchange=\"if(this.value)document.getElementById('tzLocation').value=this.value;\">";
-  html += "<option value=''>-- select --</option>";
+  html += "<div class='section-label'>Timing</div><div class='card'>";
+  html += "<div class='item'><div class='row'><label for='sunriseMinutes'>Sunrise duration</label><input type='number' id='sunriseMinutes' name='sunriseMinutes' min='1' value='" + String(sunriseMinutes) + "' style='width:4em'></div>";
+  html += "<div class='explain'>How long the light takes to fade from fully dark to fully bright once the scheduled time hits.</div></div>";
+  html += "<div class='item'><div class='row'><label for='holdMinutes'>Hold before auto-off</label><input type='number' id='holdMinutes' name='holdMinutes' min='0' max='120' value='" + String(holdMinutes) + "'></div>";
+  html += "<div class='explain'>Minutes to stay lit after the ramp finishes before turning off (0-120).</div></div>";
+  html += "</div>";
+
+  html += "<div class='section-label'>Timezone</div><div class='card'>";
+  html += "<div class='item'><div class='row tz-row'>";
+  html += "<input type='text' id='tzLocation' name='tzLocation' value='" + tzLocation + "' placeholder='e.g. America/Los_Angeles'>";
+  html += "<div class='tz-actions'>";
+  html += "<button type='button' onclick='detectTimezone()'>Detect from this device</button>";
+  html += "<select onchange=\"if(this.value)document.getElementById('tzLocation').value=this.value;\">";
+  html += "<option value=''>Pick common&hellip;</option>";
   for (int i = 0; i < NUM_TZ_PRESETS; i++) {
     html += "<option value='" + String(tzPresets[i].name) + "'>" + tzPresets[i].label + "</option>";
   }
-  html += "</select></label><br>";
-  html += "<small>Type any <a href='https://en.wikipedia.org/wiki/List_of_tz_database_time_zones' target='_blank'>tz database</a> location name, pick a common one above, or click Detect. The correct offset and DST rule are looked up automatically (needs WiFi) the next time this device syncs.</small><br>";
+  html += "</select></div></div>";
+  html += "<div class='explain'>Type any <a href='https://en.wikipedia.org/wiki/List_of_tz_database_time_zones' target='_blank'>tz database</a> location name, pick a common one, or click Detect. The correct offset and DST rule are looked up automatically (needs WiFi) the next time this device syncs.</div></div>";
+  html += "</div>";
 
-  html += "<h2>Schedule</h2>";
-  for (int i = 0; i < 7; i++) {
-    html += "<p><label><input type='checkbox' name='d" + String(i) + "e'" + (dayEnabled[i] ? " checked" : "") + "> " + dayNames[i] + "</label> ";
-    html += "<input type='number' name='d" + String(i) + "h' min='0' max='23' value='" + String(dayHour[i]) + "' style='width:4em'>:";
-    html += "<input type='number' name='d" + String(i) + "m' min='0' max='59' value='" + String(dayMinute[i]) + "' style='width:4em'></p>";
-  }
-
-  html += "<br><input type='submit' value='Save'>";
+  html += "<button type='submit' class='save-btn'>Save</button>";
   html += "</form>";
+
+  html += "<div class='section-label'>Device</div><div class='card'>";
+  html += "<div class='item'><form method='POST' action='/start'><button type='submit' class='row-btn'>Test Run Sunrise<span class='chev'>&rsaquo;</span></button></form>";
+  html += "<div class='explain'>Runs the full sunrise sequence right now, using the current duration setting - handy for testing without waiting for the scheduled time. Doesn't change the schedule.</div></div>";
+  html += "<div class='item'><form method='POST' action='/reset-wifi' onsubmit=\"return confirm('This forgets the saved WiFi network and restarts into setup mode. Continue?');\"><button type='submit' class='row-btn danger'>Reset WiFi<span class='chev'>&rsaquo;</span></button></form>";
+  html += "<div class='explain'>Forgets the saved WiFi network and restarts, broadcasting the sunrise-light-setup hotspot again so it can join a different network. Schedule and other settings aren't affected.</div></div>";
+  html += "<div class='item'><a href='/update' class='row-link'>Firmware Update<span class='chev'>&rsaquo;</span></a></div>";
+  html += "</div>";
 
   // Reads the browser's own resolved IANA timezone name directly - modern
   // browsers already know this correctly (DST rules included), so no
@@ -449,15 +535,23 @@ void handleSet() {
 
   for (int i = 0; i < 7; i++) {
     String prefix = "d" + String(i);
-    uint8_t hour = server.arg(prefix + "h").toInt();
-    uint8_t minute = server.arg(prefix + "m").toInt();
     bool enabled = server.hasArg(prefix + "e");
 
-    if (hour > 23) hour = 23;
-    if (minute > 59) minute = 59;
+    // <input type=time> submits "HH:MM" (24-hour, zero-padded) per the HTML
+    // spec regardless of the browser's display locale. Falls back to the
+    // existing value if the field is missing/malformed rather than zeroing
+    // it out, same defensive spirit as the other fields in this handler.
+    String t = server.arg(prefix + "t");
+    int colon = t.indexOf(':');
+    if (colon > 0) {
+      uint8_t hour = t.substring(0, colon).toInt();
+      uint8_t minute = t.substring(colon + 1).toInt();
+      if (hour > 23) hour = 23;
+      if (minute > 59) minute = 59;
+      dayHour[i] = hour;
+      dayMinute[i] = minute;
+    }
 
-    dayHour[i] = hour;
-    dayMinute[i] = minute;
     dayEnabled[i] = enabled;
   }
 
@@ -496,6 +590,65 @@ void handleResetWifi() {
   WiFiManager wm;
   wm.resetSettings();
   server.send(200, "text/plain", "WiFi settings cleared. Restarting...");
+  delay(1000);
+  ESP.restart();
+}
+
+// GET /update - a plain file-upload form. Point it at the .bin produced by
+// Arduino IDE's Sketch -> Export Compiled Binary (not the .ino itself - the
+// ESP32 has no on-device compiler, this flashes an already-built firmware
+// image directly into the OTA app partition via the Update library).
+// Reachable any time the device is on the network, unlike WiFiManager's own
+// /update page (only alive during its transient captive-portal window).
+void handleUpdatePage() {
+  String html = "<!DOCTYPE html><html><head><title>Firmware Update</title>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'></head><body>";
+  html += "<h1>Firmware Update</h1>";
+  html += "<p>Select the .bin from Arduino IDE's \"Sketch &gt; Export Compiled Binary\".</p>";
+  html += "<form method='POST' action='/update' enctype='multipart/form-data'>";
+  html += "<input type='file' name='update' accept='.bin'> ";
+  html += "<input type='submit' value='Upload'>";
+  html += "</form>";
+  html += "<p><a href='/'>Back</a></p>";
+  html += "</body></html>";
+  server.send(200, "text/html", html);
+}
+
+// Streams the uploaded file straight into the Update library chunk by
+// chunk as it arrives, rather than buffering the whole thing - same
+// approach WiFiManager's own /update handler uses internally.
+void handleFirmwareUpload() {
+  HTTPUpload& upload = server.upload();
+
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.print("Firmware update starting: ");
+    Serial.println(upload.filename);
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+      Update.printError(Serial);
+    }
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.print("Firmware update complete: ");
+      Serial.print(upload.totalSize);
+      Serial.println(" bytes written");
+    } else {
+      Update.printError(Serial);
+    }
+  }
+}
+
+// Runs after handleFirmwareUpload() has fully processed the request body -
+// reports whatever Update ended up recording (success or the error latched
+// by the printError() calls above) and reboots either way, since a failed
+// partial flash shouldn't be left half-applied.
+void handleFirmwareUpdate() {
+  bool ok = !Update.hasError();
+  server.sendHeader("Connection", "close");
+  server.send(200, "text/plain", ok ? "Update successful. Restarting..." : "Update failed. Restarting...");
   delay(1000);
   ESP.restart();
 }

@@ -1,3 +1,9 @@
 # WiFi credentials - never commit real secrets. See wifi_secrets.h.example
 # in each sketch folder for the template.
 wifi_secrets.h
+
+# Arduino IDE's "Export Compiled Binary" output (per-sketch build/ folders)
+build/
+
+# Claude Code local session/config state
+.claude/

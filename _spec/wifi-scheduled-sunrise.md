@@ -1,10 +1,10 @@
 # Spec: WiFi-Scheduled Sunrise (`SRM_Sunrise_Scheduled.ino`)
 
-Describes the behavior of `arduino/standalone/SRM_Sunrise_Scheduled.ino`. Everything below describes what's **currently implemented and working on real hardware** (v1 + v2 + Start Now + v3 WiFi provisioning). For the design rationale behind these decisions, see `_plans/wifi-scheduled-sunrise.md`.
+Describes the behavior of `arduino/standalone/SRM_Sunrise_Scheduled.ino`. Everything below describes what's **currently implemented** (v1 through v7 - see `_plans/wifi-scheduled-sunrise.md` for the version-by-version build record and design rationale; not everything below has been verified on real hardware yet, see that file's per-version verification checklists for what's confirmed vs. pending).
 
 ## Purpose
 
-Runs the same 512-step sunrise color progression as the other sketches in this repo, but triggers it from an onboard per-day alarm schedule (set via a web page) instead of an external smart outlet cutting power, with an editable sunrise duration, an editable post-sunrise hold time, an editable (and auto-detectable) timezone, a manual "Start Now" trigger, and phone-based WiFi setup that needs no source-code or Arduino IDE access.
+Runs the same 512-step sunrise color progression as the other sketches in this repo, but triggers it from an onboard per-day alarm schedule (set via a web page) instead of an external smart outlet cutting power, with an editable sunrise duration, an editable post-sunrise hold time, an editable (and auto-detectable) timezone, a manual "Test Run Sunrise" trigger, and phone-based WiFi setup that needs no source-code or Arduino IDE access.
 
 ## Timezone: web-editable, resolved via the ezTime library
 
@@ -33,13 +33,23 @@ Runs the same 512-step sunrise color progression as the other sketches in this r
 
 **Re-provisioning, no new hardware required:**
 - **Auto-fallback**: free, via `autoConnect()`'s default behavior above. If the saved network becomes unreachable (moved house, changed router), the very next boot drops into the setup hotspot automatically — no custom retry-counter logic needed.
-- **Manual reset while still connected**: `POST /reset-wifi` route (`handleResetWifi()`) that calls `wm.resetSettings()` then `ESP.restart()`. A "Reset WiFi" button on the status page, next to "Start Now", asks for confirmation (JS `confirm()`) before submitting, since it forces an immediate reboot into setup mode.
+- **Manual reset while still connected**: `POST /reset-wifi` route (`handleResetWifi()`) that calls `wm.resetSettings()` then `ESP.restart()`. A "Reset WiFi" button in the Device section of the status page asks for confirmation (JS `confirm()`) before submitting, since it forces an immediate reboot into setup mode.
 
 **Caveats:**
 1. While the captive portal is active (first boot with no saved creds, or right after a "Reset WiFi"), `setup()` blocks inside `wm.autoConnect()` until the user finishes setup or the config portal timeout elapses — LEDs, NTP sync, and the normal web server are all on hold during that window. This is a deliberate, bounded exception to the sketch's otherwise non-blocking philosophy, scoped only to rare setup events, never normal runtime.
 2. Config portal timeout is **`WIFI_CONFIG_PORTAL_TIMEOUT_S`, 180 seconds (3 minutes)**. Resolved in favor of a bounded timeout over staying open indefinitely: since there's no physical reset button, an indefinitely-open portal after a stray "Reset WiFi" tap (with nobody around to finish setup) would strand the device with no path back except a power-cycle anyway — a timeout doesn't make that worse, and it keeps the fails-safe behavior consistent with the rest of the sketch (continue booting, don't hang). If it times out unconfigured, the board proceeds with no WiFi, same as v1/v2's behavior when WiFi never connected; the recipient would need to power-cycle to get the portal to try again.
 3. During the portal, the device isn't reachable at `sunrise-light.local` or its normal IP — only at the setup AP's own address (typically `192.168.4.1`).
 4. Credentials live in WiFiManager's own storage now rather than anywhere visible in this sketch's own NVS namespace or web UI. There's no "show current SSID" affordance needed though — the status page's existing `WiFi.SSID()`/`WiFi.localIP()` display keeps working regardless of how the connection was configured.
+
+## Firmware updates via the web UI
+
+**Driver:** WiFiManager already has a built-in `/update` OTA page (uses the ESP32 core's own `Update` library), but it only exists while WiFiManager's own internal web server is running — which, given this sketch's `connectWiFi()` creates a function-local `WiFiManager wm` object, is only during the brief captive-portal window (first boot or right after "Reset WiFi"), not during normal day-to-day operation. Verified working via that route once, then reimplemented directly against this sketch's own always-on `WebServer` so it's reachable any time the device is on the network, without needing to wipe WiFi credentials first.
+
+- `GET /update` / `POST /update` (see "Web interface" below) added to the same `WebServer server` instance as every other route in this sketch - `#include <Update.h>` (ships with the ESP32 core, no library install needed) is the only addition.
+- Upload flow is identical in spirit to WiFiManager's own: a `<input type='file'>` form posts multipart data; `WebServer::on()`'s upload-callback overload streams it chunk-by-chunk into `Update.write()` rather than buffering the whole file in RAM; a final response handler checks `Update.hasError()` and reboots regardless of outcome (a failed partial flash shouldn't be left half-applied).
+- Requires the .bin from Arduino IDE's **Sketch → Export Compiled Binary** (or `arduino-cli compile --export-binaries`) - there's no on-device compiler, so the raw `.ino` can't be uploaded directly.
+- Requires an OTA-capable partition scheme (Tools → Partition Scheme in Arduino IDE) with two app slots - the default "Default" scheme for ESP32 Dev Module already provides this, so no sketch-level change was needed.
+- **No authentication** on `/update`, same as every other route in this sketch (`/start`, `/set`, `/reset-wifi`) - anyone on the local network can push firmware. Consistent with this sketch's existing security posture (no auth anywhere), but worth knowing given the "gift to a non-technical user" scenario the WiFi provisioning feature above was designed around - the device trusts its local network.
 
 ## Requirements
 
@@ -142,20 +152,18 @@ Keys for the 7 days are built programmatically (`"d" + i + "h"`, etc.) in a loop
 
 ### `GET /`
 
-Returns an HTML status/config page showing:
-- Current local time (or "not synced yet" if NTP hasn't succeeded)
-- WiFi status (IP address, or "disconnected")
-- The mDNS address (`http://sunrise-light.local/`)
-- Sunrise state (`Waiting` / `Running` / `Holding`) and progress percentage (0 in `WAITING`, `currentStep/511` in `RUNNING`, 100 in `HOLD`)
-- A standalone **Start Now** button (its own form, posts to `/start`)
-- A standalone **Reset WiFi** button (its own form, posts to `/reset-wifi`, with a JS confirm prompt since it forces an immediate reboot into setup mode)
-- A settings form (posts to `/set`) with:
-  - **Timing**: sunrise duration in minutes (with a short explanation of what it means), hold-before-auto-off in minutes (0–120), and a timezone location field with a preset dropdown of common zones and a "Detect from this device" button (fills the field from the browser's own `Intl.DateTimeFormat` timezone - see above)
-  - **Schedule**: one row per day of the week (Sun…Sat), each with an enabled checkbox, hour input, and minute input, pre-filled with current values
+Returns an HTML status/config page styled as grouped white cards on a light gray background (iOS-Settings-like: uppercase section labels, pure-CSS toggle switches, one warm accent color `#ff9500`, no external fonts/CSS - the whole `<style>` block is inline since the page must render standalone from the ESP32). The page body caps at `max-width:480px` and centers itself (`margin:0 auto`), so it stays comfortably phone-width on a desktop browser without stretching edge-to-edge, while being a no-op on an actual phone (viewport already narrower than that). Each field's explanatory caption is grouped with the field above it, not the one below, via a shared `.item` wrapper that carries the divider between groups rather than the field itself. Layout, top to bottom:
+- A hero card: current local time (or "Time not synced yet"), a colored state pill (`Waiting`/`Running N%`/`Holding` - gray/amber/green respectively), WiFi IP (or "WiFi disconnected"), mDNS address, and firmware version (`FIRMWARE_VERSION`)
+- A settings form (posts to `/set`), itself split into three card sections:
+  - **Schedule**: one row per day of the week (Sun…Sat), each with a day label, a single native `<input type="time">` field (renders as the phone's own time-picker UI), and a toggle switch for enabled - replaces the old separate hour/minute number inputs
+  - **Timing**: sunrise duration in minutes (with a short explanation), hold-before-auto-off in minutes (0–120, with a short explanation)
+  - **Timezone**: a location text field, a "Detect from this device" button (fills the field from the browser's own `Intl.DateTimeFormat` timezone), and a preset dropdown of common zones
+  - A full-width **Save** button
+- A **Device** card, deliberately separated from the settings form/save flow above (each of these acts immediately, not on Save): **Test Run Sunrise** (renamed from "Start Now" - own form, posts to `/start`, with an explanatory line noting it doesn't touch the schedule), **Reset WiFi** (own form, posts to `/reset-wifi`, JS confirm prompt since it forces an immediate reboot into setup mode, with an explanatory line noting other settings aren't affected), **Firmware Update** (link to `/update`)
 
 ### `POST /set`
 
-Reads `sunriseMinutes` (clamped to a minimum of 1 — no upper cap), `holdMinutes` (clamped to a maximum of 120), `tzLocation` (trimmed; ignored if empty, over 60 characters, or unchanged from the current value, in which case the previous value is kept), and for each of the 7 days, `dNh`/`dNm`/`dNe` (hour clamped ≤23, minute clamped ≤59, `dNe` checkbox presence = enabled). Saves everything to NVS in one transaction (`saveAlarmSettings()`), updates the in-RAM cache, and — only if the timezone actually changed and WiFi is connected — re-resolves it immediately via `myTZ.setLocation()`. Responds with a 303 redirect back to `/`.
+Reads `sunriseMinutes` (clamped to a minimum of 1 — no upper cap), `holdMinutes` (clamped to a maximum of 120), `tzLocation` (trimmed; ignored if empty, over 60 characters, or unchanged from the current value, in which case the previous value is kept), and for each of the 7 days, `dNt`/`dNe` (`dNt` is the `<input type="time">` value, `"HH:MM"` 24-hour per the HTML spec regardless of display locale - parsed via `indexOf(':')`, hour clamped ≤23, minute clamped ≤59, kept at its previous value if the field is missing/malformed rather than zeroed; `dNe` checkbox presence = enabled). Saves everything to NVS in one transaction (`saveAlarmSettings()`), updates the in-RAM cache, and — only if the timezone actually changed and WiFi is connected — re-resolves it immediately via `myTZ.setLocation()`. Responds with a 303 redirect back to `/`.
 
 ### `POST /start`
 
@@ -165,13 +173,21 @@ Calls `beginSunrise()` — immediately starts a sunrise regardless of current st
 
 Calls `WiFiManager::resetSettings()` to forget the saved network, sends a plain-text confirmation, then `ESP.restart()`s after a 1s delay. On reboot, `autoConnect()` finds no saved credentials and immediately opens the `sunrise-light-setup` captive portal.
 
+### `GET /update`
+
+Returns a plain HTML form (`<input type='file'>` + submit) for uploading a firmware `.bin`, plus a link back to `/`. Distinct from - and, unlike - WiFiManager's own built-in `/update` page (see "Firmware updates" below): reachable at any time the device is online, not just during the transient captive-portal window.
+
+### `POST /update`
+
+Multipart file upload, handled via `WebServer::on()`'s upload-callback overload (`handleFirmwareUpload()` processes each chunk as it arrives through the `Update` library - `Update.begin()`/`.write()`/`.end(true)` - rather than buffering the whole file; `handleFirmwareUpdate()` runs once the body is fully received, reports success/failure via `Update.hasError()`, and calls `ESP.restart()` either way after a 1s delay). The uploaded file must be a `.bin` produced by Arduino IDE's **Sketch → Export Compiled Binary** (or `arduino-cli compile --export-binaries`) - the ESP32 has no on-device compiler, so raw `.ino` source can't be uploaded here.
+
 ### Anything else
 
 Any other path returns `404 Not found` (plain text).
 
 ## Fails-safe behavior (known limitations, not bugs)
 
-- **No WiFi at boot (portal times out or nobody configures it)**: sketch continues; `/` reports "disconnected" and "not synced yet"; the `WAITING` schedule check never runs (no time available), so nothing fires on schedule. Manually pressing **Start Now** still works, since running a sunrise doesn't need wall-clock time. A power-cycle is needed to make the captive portal try again.
+- **No WiFi at boot (portal times out or nobody configures it)**: sketch continues; `/` reports "disconnected" and "not synced yet"; the `WAITING` schedule check never runs (no time available), so nothing fires on schedule. Manually pressing **Test Run Sunrise** still works, since running a sunrise doesn't need wall-clock time. A power-cycle is needed to make the captive portal try again.
 - **NTP sync fails**: same effect as no WiFi — the schedule can't evaluate, but a `RUNNING`/`HOLD` sunrise already in progress, or one started manually, proceeds and completes normally.
 - **Alarm already fired today, then board reboots**: `lastFiredYday` resets to `-1` in RAM, so if that day's alarm time is reached again post-reboot, it **will** fire a second time that day.
 - **Missed the exact trigger minute** (e.g. board busy or rebooting during that minute): no catch-up; waits for the next scheduled day.
@@ -186,4 +202,4 @@ Any other path returns `404 Not found` (plain text).
 
 ## Verification checklist (real hardware)
 
-See `_plans/wifi-scheduled-sunrise.md` for the full hardware test plan (WiFi captive-portal setup and reset, NTP accuracy incl. DST, web form round-trip including Start Now, correct-day/wrong-day firing, NVS persistence across power-cycle, LED hold with no flicker and correct auto-off timing, responsiveness while `RUNNING`, and mDNS resolution).
+See `_plans/wifi-scheduled-sunrise.md` for the full hardware test plan (WiFi captive-portal setup and reset, NTP accuracy incl. DST, web form round-trip including Test Run Sunrise, correct-day/wrong-day firing, NVS persistence across power-cycle, LED hold with no flicker and correct auto-off timing, responsiveness while `RUNNING`, mDNS resolution, and OTA firmware updates via `/update`).

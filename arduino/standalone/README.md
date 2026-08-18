@@ -35,7 +35,7 @@ This folder contains standalone Arduino sketches for the sunrise alarm clock. No
 - **Best for:** ESP32 users who want onboard scheduling and a web UI instead of a smart outlet
 - **Execution:** Non-blocking; connects to WiFi, syncs time via NTP, and serves a web page
 - **Steps:** Same 512-step color math as the other sketches
-- **Pros:** Independent alarm per day of the week, editable sunrise duration and hold time, manual "Start Now" trigger, WiFi setup via phone (no source code/IDE access needed), settings survive reboot
+- **Pros:** Independent alarm per day of the week, editable sunrise duration and hold time, manual "Test Run Sunrise" trigger, WiFi setup via phone (no source code/IDE access needed), settings survive reboot
 - **Cons:** Needs continuous power (not the smart outlet), needs a 2.4GHz WiFi network, more setup than the other sketches, one extra library (WiFiManager)
 - See **[WiFi-Scheduled Sunrise setup](#-wifi-scheduled-sunrise-srm_sunrise_scheduledino)** below for full instructions
 
@@ -160,8 +160,9 @@ This sketch is a different setup path from the sketches above - it needs an ESP3
 - **Web page** at `http://sunrise-light.local/` (or the board's IP address) to view status and change settings without re-flashing
 - **Editable sunrise duration** and **hold time** (how long the light stays on before auto-off after the ramp finishes)
 - **Editable timezone**, set by typing a location name (e.g. "America/Los_Angeles"), picking one from a preset dropdown, or clicking "Detect from this device" - no POSIX TZ strings or DST rules to figure out, ezTime resolves it correctly
-- **Start Now button** to trigger a sunrise on demand, separate from the schedule
+- **Test Run Sunrise button** to trigger a sunrise on demand, separate from the schedule
 - **WiFi setup via phone, no source code needed** - first boot (or after a "Reset WiFi") opens a WiFi setup hotspot instead of requiring hardcoded credentials, so the board can be built and handed to someone else to join their own network
+- **Firmware updates over WiFi** - upload a newly-compiled `.bin` through the web page any time the device is online, no USB cable or re-pairing needed
 - **Settings persist** across power loss/reboot (stored in the ESP32's flash, not just RAM)
 
 ### Setup steps
@@ -178,7 +179,9 @@ This sketch is a different setup path from the sketches above - it needs an ESP3
 
 5. **Connect it to WiFi:** on first boot (no saved network yet), the board broadcasts a WiFi network named **`sunrise-light-setup`**. From a phone or computer, join that network like any other WiFi network - a setup page should pop up automatically (or open a browser to `192.168.4.1`). Pick your real network from the list, enter its password, and submit. The board reboots and joins that network. ESP32 only supports **2.4GHz** WiFi - if your router broadcasts separate 2.4GHz/5GHz networks, pick the 2.4GHz one. If nobody finishes setup within 3 minutes, the board gives up and boots offline (LEDs stay off, no schedule fires) - power-cycle it to make the setup hotspot try again.
 
-6. **Access the web page:** from a phone or computer on the same WiFi network, go to `http://sunrise-light.local/` (works on macOS/iOS/Android out of the box; Windows may need Bonjour installed) or the IP address printed in Serial Monitor. From there you can set each day's alarm time, the sunrise duration, and the hold time. For **timezone**, click **Detect from this device** to fill it in from your phone/computer's own clock, pick one from the dropdown of common zones, or type any [tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) location name by hand - then hit **Save**; the board looks up the correct offset and DST rule automatically (needs WiFi). Hit **Start Now** to test the LED sequence immediately, or **Reset WiFi** to forget the current network and reopen the `sunrise-light-setup` hotspot (e.g. to move the device to a new house/network).
+6. **Access the web page:** from a phone or computer on the same WiFi network, go to `http://sunrise-light.local/` (works on macOS/iOS/Android out of the box; Windows may need Bonjour installed) or the IP address printed in Serial Monitor. The page is grouped into cards: **Schedule** (each day gets a native time picker and an on/off switch), **Timing** (sunrise duration, hold time), and **Timezone** (click **Detect from this device** to fill it in from your phone/computer's own clock, pick one from the dropdown of common zones, or type any [tz database](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones) location name by hand) - hit **Save** to apply all three; the board looks up the correct timezone offset and DST rule automatically (needs WiFi). A separate **Device** section at the bottom has **Test Run Sunrise** (test the LED sequence immediately), **Reset WiFi** (forget the current network and reopen the `sunrise-light-setup` hotspot - e.g. to move the device to a new house/network), and **Firmware Update**.
+
+7. **Updating firmware later:** after changing the sketch, use **Sketch → Export Compiled Binary** in Arduino IDE to produce a `.bin` file (next to the `.ino`, under a `build/` subfolder) - not the `.ino` itself, since the board can't compile source on its own. From the web page, click **Firmware Update**, choose that `.bin`, and upload it; the board flashes it and reboots on its own new code, no USB cable needed. Existing schedule/WiFi settings aren't affected. There's no login on this page, so treat it like the rest of this device's web UI - fine on a home network, not something to expose to the open internet.
 
 ---
 
